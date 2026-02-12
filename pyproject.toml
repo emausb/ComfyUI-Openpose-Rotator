@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-pose-rotator"
+version = "0.1.0"
+description = "ComfyUI custom node to rotate OpenPose figures around their torso"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Open Pose Rotator Contributors" }
+]
+keywords = ["comfyui", "openpose", "pose", "controlnet"]
+
+[project.urls]
+Repository = "https://github.com/example/open-pose-rotator"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]
