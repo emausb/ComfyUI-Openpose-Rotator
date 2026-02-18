@@ -446,6 +446,39 @@ def rotate_keypoints_3d(
     return result, depths
 
 
+def _center_keypoints_on_canvas(
+    keypoints: dict[str, list[tuple[float, float, float]]],
+    width: int,
+    height: int,
+) -> dict[str, list[tuple[float, float, float]]]:
+    """
+    Translate keypoints so the figure centroid aligns with image center.
+    Fixes figure being pushed to one side after rotation.
+    """
+    all_x, all_y, total_conf = 0.0, 0.0, 0.0
+    for pts in keypoints.values():
+        for x, y, c in pts:
+            if c > 0:
+                all_x += x * c
+                all_y += y * c
+                total_conf += c
+
+    if total_conf <= 0:
+        return keypoints
+
+    cx = all_x / total_conf
+    cy = all_y / total_conf
+    target_x = width / 2.0
+    target_y = height / 2.0
+    dx = target_x - cx
+    dy = target_y - cy
+
+    result: dict[str, list[tuple[float, float, float]]] = {}
+    for part, pts in keypoints.items():
+        result[part] = [(x + dx, y + dy, c) for x, y, c in pts]
+    return result
+
+
 def join_broken_segments(
     keypoints: dict[str, list[tuple[float, float, float]]],
     threshold: float,
@@ -475,7 +508,13 @@ def render_openpose_image(
 
     # Build limb list with depth for sorting (mean depth of endpoints)
     # Only draw limbs between valid main-body indices - never connect to face (0, 15-18)
+    # Spatial sanity: skip limbs where endpoints are implausibly far (e.g. knee-to-head
+    # when source format has different keypoint order than COCO)
     limb_data: list[tuple[int, int, int, float]] = []
+    max_limb_ratio = 0.5  # Max limb length vs image diagonal; filters knee-to-head etc.
+    diag = (width**2 + height**2) ** 0.5
+    max_limb_len = diag * max_limb_ratio
+
     for i, (a, b) in enumerate(BODY_LIMBS):
         if a >= len(body) or b >= len(body):
             continue
@@ -484,6 +523,10 @@ def render_openpose_image(
         x1, y1, c1 = body[a]
         x2, y2, c2 = body[b]
         if c1 <= 0 or c2 <= 0:
+            continue
+        # Skip anatomically implausible limbs (e.g. index 14=face in some formats, not l_ankle)
+        limb_len = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+        if limb_len > max_limb_len:
             continue
         depth_a = body_depths[a] if a < len(body_depths) else 0.0
         depth_b = body_depths[b] if b < len(body_depths) else 0.0
@@ -558,6 +601,9 @@ def rotate_openpose(
     # Rotate (returns keypoints and depth for occlusion/ordering)
     rotated, depths = rotate_keypoints_3d(keypoints, pivot, degrees, direction)
     rotated = join_broken_segments(rotated, 0.0)
+
+    # Center figure in output canvas (fixes right/left bias after rotation)
+    rotated = _center_keypoints_on_canvas(rotated, w, h)
 
     # Render with depth-ordered drawing
     rendered = render_openpose_image(rotated, w, h, depths)
