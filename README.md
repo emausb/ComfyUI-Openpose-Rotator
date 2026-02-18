@@ -8,6 +8,10 @@ A ComfyUI custom node that rotates OpenPose figures around their torso pivot poi
 - **Parameters**: Direction (left/right), degrees (1-360)
 - **Fallback**: When POSE_KEYPOINT is not provided, uses DWPose from comfyui-controlnet-aux to extract keypoints (requires that extension)
 - **Error handling**: Returns input image unchanged if torso cannot be detected
+- **Anatomy-aware rotation**: Limb-specific depth scales per OpenPose COCO body indices for more natural turns
+- **Adaptive depth**: Depth scale adapts to shoulder width for consistent results across image sizes
+- **Face visibility**: Face/head keypoints (nose, eyes, ears) hidden when rotation >90° (back of head)
+- **Occlusion**: Points behind the torso are hidden; limbs drawn in depth order for correct overlap
 
 ## Installation
 
@@ -36,6 +40,10 @@ A ComfyUI custom node that rotates OpenPose figures around their torso pivot poi
 
 - **With keypoints**: Load Image → DWPose Estimator → OpenPose Rotator (connect both IMAGE and POSE_KEYPOINT) → Apply ControlNet
 - **Image only**: Load Image → OpenPose Rotator → Apply ControlNet (requires comfyui-controlnet-aux for DWPose)
+
+## Implementation Notes
+
+Rotation uses geometry-based depth inference from 2D OpenPose keypoints (no ML dependency). Depth is inferred per OpenPose COCO body index using anatomic proportions. For true 3D pose lifting from 2D, libraries like [VideoPose3D](https://github.com/facebookresearch/VideoPose3D) or [MMPose](https://github.com/open-mmlab/mmpose) exist but use different keypoint formats (e.g. Human3.6M) and would require format conversion.
 
 ## License
 

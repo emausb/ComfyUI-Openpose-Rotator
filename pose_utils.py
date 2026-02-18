@@ -10,11 +10,45 @@ from typing import Any
 import cv2
 import numpy as np
 
-# Body keypoint indices (0-based, COCO format)
+# Body keypoint indices (0-based, OpenPose COCO format)
 # 0=nose, 1=neck, 2=r_shoulder, 3=r_elbow, 4=r_wrist, 5=l_shoulder, 6=l_elbow, 7=l_wrist,
 # 8=mid_hip, 9=r_hip, 10=r_knee, 11=r_ankle, 12=l_hip, 13=l_knee, 14=l_ankle,
 # 15=r_eye, 16=l_eye, 17=r_ear, 18=l_ear
 TORSO_INDICES = [1, 2, 5, 8, 9, 12]  # neck, shoulders, mid_hip, hips
+
+# Face/head keypoints (hidden when rotated >90° - back of head visible)
+FACE_INDICES = {0, 15, 16, 17, 18}
+
+# Limb-specific depth scales (OpenPose COCO body indices 0-18)
+# Torso compact; arms/legs extend further; head moderate
+# Based on typical human proportions in frontal view
+BODY_DEPTH_SCALES: dict[int, float] = {
+    0: 0.30,   # nose - head
+    1: 0.20,   # neck - torso center
+    2: 0.35,   # r_shoulder
+    3: 0.50,   # r_elbow - arm extends
+    4: 0.55,   # r_wrist
+    5: 0.35,   # l_shoulder
+    6: 0.50,   # l_elbow
+    7: 0.55,   # l_wrist
+    8: 0.22,   # mid_hip - torso
+    9: 0.30,   # r_hip
+    10: 0.45,  # r_knee - leg extends
+    11: 0.50,  # r_ankle
+    12: 0.30,  # l_hip
+    13: 0.45,  # l_knee
+    14: 0.50,  # l_ankle
+    15: 0.28,  # r_eye
+    16: 0.28,  # l_eye
+    17: 0.30,  # r_ear
+    18: 0.30,  # l_ear
+}
+
+# Default depth scale for hands (21 keypoints each - no per-index in OpenPose hand spec)
+HAND_DEPTH_SCALE = 0.45
+
+# Occlusion: points with depth below this (behind torso) get confidence zeroed
+OCCLUSION_DEPTH_THRESHOLD = -0.15
 
 # Limb connections for body (1-indexed in ControlNet util, we use 0-indexed)
 # limbSeq: (from_part, to_part) - 0-indexed
@@ -200,41 +234,99 @@ def compute_torso_pivot(keypoints: dict[str, list[tuple[float, float, float]]]) 
     return (xs / total_conf, ys / total_conf)
 
 
+def _compute_adaptive_depth_scale(
+    keypoints: dict[str, list[tuple[float, float, float]]],
+    pivot: tuple[float, float],
+) -> float:
+    """
+    Compute adaptive depth scale from body proportions (shoulder width).
+    Normalizes to typical pose so rotation looks consistent across image sizes.
+    """
+    body = keypoints.get("body", [])
+    if len(body) < 6:
+        return 0.4
+    x2, _, c2 = body[2]  # r_shoulder
+    x5, _, c5 = body[5]   # l_shoulder
+    if c2 <= 0 or c5 <= 0:
+        return 0.4
+    shoulder_width = abs(x2 - x5)
+    if shoulder_width < 1:
+        return 0.4
+    # Typical shoulder width ~100-150px in normalized poses; scale so base 0.4 holds
+    return 0.4 * (120.0 / shoulder_width)
+
+
 def rotate_keypoints_3d(
     keypoints: dict[str, list[tuple[float, float, float]]],
     pivot: tuple[float, float],
     degrees: float,
     direction: str,
-    depth_scale: float = 0.4,
-) -> dict[str, list[tuple[float, float, float]]]:
+    depth_scale: float | None = None,
+) -> tuple[dict[str, list[tuple[float, float, float]]], dict[str, list[float]]]:
     """
     Rotate all keypoints around Y-axis through pivot. Left = positive angle (CCW), right = negative.
-    Uses z = (x - pivot_x) * depth_scale for depth inference.
+    Uses limb-specific depth inference per OpenPose COCO body indices.
+    Returns (rotated_keypoints, depth_per_point) for occlusion and depth-ordered rendering.
     """
     theta_deg = degrees if direction == "left" else -degrees
     theta = math.radians(theta_deg)
     cx, cy = pivot
+
+    if depth_scale is None:
+        depth_scale = _compute_adaptive_depth_scale(keypoints, pivot)
+
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
 
-    def rotate_point(x: float, y: float) -> tuple[float, float]:
-        z = (x - cx) * depth_scale
+    def rotate_point(
+        x: float, y: float, scale: float
+    ) -> tuple[float, float, float]:
+        # Side-aware: (x - cx) gives correct sign for left/right body sides
+        z = (x - cx) * scale
         x_new = (x - cx) * cos_t - z * sin_t + cx
-        y_new = y  # Y unchanged for Y-axis rotation
-        return (x_new, y_new)
+        y_new = y
+        z_new = (x - cx) * sin_t + z * cos_t  # depth after rotation
+        return (x_new, y_new, z_new)
 
     result: dict[str, list[tuple[float, float, float]]] = {}
-    for part, points in keypoints.items():
-        rotated = []
-        for x, y, c in points:
-            if c > 0:
-                nx, ny = rotate_point(x, y)
-                rotated.append((nx, ny, c))
-            else:
-                rotated.append((x, y, c))
-        result[part] = rotated
+    depths: dict[str, list[float]] = {}
 
-    return result
+    for part, points in keypoints.items():
+        rotated: list[tuple[float, float, float]] = []
+        part_depths: list[float] = []
+
+        for i, (x, y, c) in enumerate(points):
+            if c <= 0:
+                rotated.append((x, y, c))
+                part_depths.append(0.0)
+                continue
+
+            scale = BODY_DEPTH_SCALES.get(i, HAND_DEPTH_SCALE) if part == "body" else HAND_DEPTH_SCALE
+            nx, ny, z_new = rotate_point(x, y, depth_scale * scale)
+
+            # Occlusion: hide points far behind torso
+            if z_new < OCCLUSION_DEPTH_THRESHOLD:
+                rotated.append((nx, ny, 0.0))
+            else:
+                rotated.append((nx, ny, c))
+            part_depths.append(z_new)
+
+        result[part] = rotated
+        depths[part] = part_depths
+
+    # Face visibility: when rotated >90°, hide face/head keypoints (back of head)
+    if abs(theta_deg) >= 90:
+        if "body" in result:
+            body = result["body"]
+            for idx in FACE_INDICES:
+                if idx < len(body):
+                    x, y, c = body[idx]
+                    body[idx] = (x, y, 0.0)
+        # Also hide separate face keypoints (OpenPose face mesh)
+        if "face" in result:
+            result["face"] = [(x, y, 0.0) for x, y, c in result["face"]]
+
+    return result, depths
 
 
 def join_broken_segments(
@@ -252,42 +344,78 @@ def render_openpose_image(
     keypoints: dict[str, list[tuple[float, float, float]]],
     width: int,
     height: int,
+    depths: dict[str, list[float]] | None = None,
 ) -> np.ndarray:
     """
     Draw OpenPose skeleton on blank canvas. White background, colored limbs and joints.
+    When depths is provided, limbs are drawn back-to-front for correct occlusion.
     """
     canvas = np.ones((height, width, 3), dtype=np.uint8) * 255
 
     body = keypoints.get("body", [])
+    body_depths = depths.get("body", []) if depths else []
 
-    # Draw body limbs
+    # Build limb list with depth for sorting (mean depth of endpoints)
+    limb_data: list[tuple[int, int, int, float]] = []
     for i, (a, b) in enumerate(BODY_LIMBS):
         if a >= len(body) or b >= len(body):
             continue
         x1, y1, c1 = body[a]
         x2, y2, c2 = body[b]
-        if c1 > 0 and c2 > 0:
-            color = BODY_COLORS[i % len(BODY_COLORS)]
-            cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, 4)
+        if c1 <= 0 or c2 <= 0:
+            continue
+        depth_a = body_depths[a] if a < len(body_depths) else 0.0
+        depth_b = body_depths[b] if b < len(body_depths) else 0.0
+        mean_depth = (depth_a + depth_b) / 2
+        limb_data.append((a, b, i, mean_depth))
 
-    # Draw body joints
-    for i, (x, y, c) in enumerate(body):
-        if c > 0:
-            color = BODY_COLORS[i % len(BODY_COLORS)]
-            cv2.circle(canvas, (int(x), int(y)), 4, color, -1)
+    # Draw body limbs back-to-front (far limbs first)
+    limb_data.sort(key=lambda t: t[3])
+    for a, b, i, _ in limb_data:
+        x1, y1, c1 = body[a]
+        x2, y2, c2 = body[b]
+        color = BODY_COLORS[i % len(BODY_COLORS)]
+        cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, 4)
 
-    # Draw hands
-    for hand_pts in [keypoints.get("hand_left", []), keypoints.get("hand_right", [])]:
+    # Draw body joints (front-facing first so they appear on top)
+    joint_data = [(i, x, y, c) for i, (x, y, c) in enumerate(body) if c > 0]
+    if body_depths:
+        joint_data.sort(key=lambda t: -body_depths[t[0]] if t[0] < len(body_depths) else 0)
+    for i, x, y, c in joint_data:
+        color = BODY_COLORS[i % len(BODY_COLORS)]
+        cv2.circle(canvas, (int(x), int(y)), 4, color, -1)
+
+    # Draw hands (with depth ordering if available)
+    for hand_key, hand_pts in [("hand_left", keypoints.get("hand_left", [])),
+                               ("hand_right", keypoints.get("hand_right", []))]:
         if len(hand_pts) < 2:
             continue
+        hand_depths = depths.get(hand_key, []) if depths else []
+
+        # Sort hand edges by depth for proper occlusion
+        edges_with_depth: list[tuple[int, int, float]] = []
         for a, b in HAND_EDGES:
             if a >= len(hand_pts) or b >= len(hand_pts):
                 continue
             x1, y1, c1 = hand_pts[a]
             x2, y2, c2 = hand_pts[b]
-            if c1 > 0 and c2 > 0:
-                cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
-        for x, y, c in hand_pts:
+            if c1 <= 0 or c2 <= 0:
+                continue
+            d_a = hand_depths[a] if a < len(hand_depths) else 0.0
+            d_b = hand_depths[b] if b < len(hand_depths) else 0.0
+            edges_with_depth.append((a, b, (d_a + d_b) / 2))
+        if hand_depths:
+            edges_with_depth.sort(key=lambda t: t[2])
+        for a, b, _ in edges_with_depth:
+            x1, y1, c1 = hand_pts[a]
+            x2, y2, c2 = hand_pts[b]
+            cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
+
+        joint_order = list(range(len(hand_pts)))
+        if hand_depths and len(hand_depths) == len(hand_pts):
+            joint_order.sort(key=lambda idx: -hand_depths[idx] if hand_pts[idx][2] > 0 else 999)
+        for idx in joint_order:
+            x, y, c = hand_pts[idx]
             if c > 0:
                 cv2.circle(canvas, (int(x), int(y)), 3, (0, 0, 255), -1)
 
@@ -320,10 +448,10 @@ def rotate_openpose(
     if pivot is None:
         return image, False
 
-    # Rotate
-    rotated = rotate_keypoints_3d(keypoints, pivot, degrees, direction)
+    # Rotate (returns keypoints and depth for occlusion/ordering)
+    rotated, depths = rotate_keypoints_3d(keypoints, pivot, degrees, direction)
     rotated = join_broken_segments(rotated, 0.0)
 
-    # Render
-    rendered = render_openpose_image(rotated, w, h)
+    # Render with depth-ordered drawing
+    rendered = render_openpose_image(rotated, w, h, depths)
     return rendered, True
