@@ -120,6 +120,51 @@ def _body_from_numpy(arr: np.ndarray) -> list[tuple[float, float, float]]:
     return points
 
 
+def _scale_keypoints_to_image(
+    keypoints: dict[str, list[tuple[float, float, float]]],
+    width: int,
+    height: int,
+) -> dict[str, list[tuple[float, float, float]]]:
+    """
+    Scale keypoints to image dimensions.
+    - Normalized [0,1] coords: scale by width, height
+    - Pixel coords from smaller resolution (e.g. DWPose at 384): scale to match image
+    """
+    all_x, all_y = [], []
+    for pts in keypoints.values():
+        for x, y, c in pts:
+            if c > 0:
+                all_x.append(x)
+                all_y.append(y)
+
+    if not all_x or not all_y:
+        return keypoints
+
+    max_x, max_y = max(all_x), max(all_y)
+    min_x, min_y = min(all_x), min(all_y)
+
+    # Normalized coords in [0,1] (ComfyUI POSE_KEYPOINT may use this)
+    if max_x <= 1.5 and max_y <= 1.5 and min_x >= -0.1 and min_y >= -0.1:
+        scale_x, scale_y = width, height
+    # Pixel coords from smaller resolution (e.g. DWPose at 384)
+    elif max_x < width * 0.95 or max_y < height * 0.95:
+        scale_x = width / max(max_x, 1)
+        scale_y = height / max(max_y, 1)
+        if abs(scale_x - 1.0) < 0.01 and abs(scale_y - 1.0) < 0.01:
+            return keypoints
+    else:
+        return keypoints
+
+    result: dict[str, list[tuple[float, float, float]]] = {}
+    for part, pts in keypoints.items():
+        scaled = [
+            (x * scale_x, y * scale_y, c) if c > 0 else (x, y, c)
+            for x, y, c in pts
+        ]
+        result[part] = scaled
+    return result
+
+
 def parse_pose_keypoint(pose_keypoint: Any) -> dict[str, list[tuple[float, float, float]]] | None:
     """
     Parse POSE_KEYPOINT from ComfyUI (OpenPose/DWPose format) into normalized structure.
@@ -167,6 +212,14 @@ def parse_pose_keypoint(pose_keypoint: Any) -> dict[str, list[tuple[float, float
             if body:
                 return {"body": body, "hand_left": hand_left, "hand_right": hand_right, "face": face}
 
+    # Structure 3: flat {"pose_keypoints_2d": [...], ...} at top level (no "people")
+    body = _extract_keypoint_array(data.get("pose_keypoints_2d"))
+    if body:
+        hand_left = _extract_keypoint_array(data.get("hand_left_keypoints_2d"))
+        hand_right = _extract_keypoint_array(data.get("hand_right_keypoints_2d"))
+        face = _extract_keypoint_array(data.get("face_keypoints_2d"))
+        return {"body": body, "hand_left": hand_left, "hand_right": hand_right, "face": face}
+
     return None
 
 
@@ -212,21 +265,50 @@ def extract_keypoints_from_image(image: np.ndarray) -> dict[str, list[tuple[floa
 def compute_torso_pivot(keypoints: dict[str, list[tuple[float, float, float]]]) -> tuple[float, float] | None:
     """
     Compute torso center from body keypoints. Uses neck, shoulders, mid_hip, hips.
+    Supports "no torso segment" variants: derives neck from shoulders and mid_hip from hips
+    when those keypoints are missing (c<=0) but shoulders/hips are present.
     Returns (cx, cy) or None if insufficient keypoints.
     """
     body = keypoints.get("body", [])
     if len(body) < 2:
         return None
 
-    xs, ys, total_conf = 0.0, 0.0, 0.0
-    for idx in TORSO_INDICES:
+    def get_pt(idx: int) -> tuple[float, float, float] | None:
         if idx >= len(body):
-            continue
+            return None
         x, y, c = body[idx]
-        if c > 0:
+        return (x, y, c) if c > 0 else None
+
+    xs, ys, total_conf = 0.0, 0.0, 0.0
+
+    for idx in TORSO_INDICES:
+        pt = get_pt(idx)
+        if pt is not None:
+            x, y, c = pt
             xs += x * c
             ys += y * c
             total_conf += c
+
+    # Fallback for "no torso segment" / stick-figure variants: derive missing points
+    # Neck (1) from shoulders (2, 5); mid_hip (8) from hips (9, 12)
+    if get_pt(1) is None:
+        r_sh = get_pt(2)
+        l_sh = get_pt(5)
+        if r_sh is not None and l_sh is not None:
+            nx = (r_sh[0] + l_sh[0]) / 2
+            ny = (r_sh[1] + l_sh[1]) / 2
+            xs += nx
+            ys += ny
+            total_conf += 1.0
+    if get_pt(8) is None:
+        r_hip = get_pt(9)
+        l_hip = get_pt(12)
+        if r_hip is not None and l_hip is not None:
+            mx = (r_hip[0] + l_hip[0]) / 2
+            my = (r_hip[1] + l_hip[1]) / 2
+            xs += mx
+            ys += my
+            total_conf += 1.0
 
     if total_conf <= 0:
         return None
@@ -442,6 +524,9 @@ def rotate_openpose(
 
     if keypoints is None:
         return image, False
+
+    # Scale normalized coords to image size (ComfyUI may pass 0-1 range)
+    keypoints = _scale_keypoints_to_image(keypoints, w, h)
 
     # Torso pivot
     pivot = compute_torso_pivot(keypoints)
