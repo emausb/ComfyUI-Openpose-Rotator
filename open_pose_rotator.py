@@ -6,13 +6,14 @@ Rotates OpenPose figures around their torso pivot point.
 import torch
 import numpy as np
 
-from .pose_utils import rotate_openpose
+from .pose_utils import rotate_openpose, _keypoints_to_openpose_dict
 
 
 class OpenPoseRotator:
     CATEGORY = "image/pose"
     FUNCTION = "rotate_pose"
-    RETURN_TYPES = ("IMAGE",)
+    RETURN_TYPES = ("IMAGE", "POSE_KEYPOINT")
+    RETURN_NAMES = ("IMAGE", "POSE_KEYPOINT")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -33,12 +34,14 @@ class OpenPoseRotator:
         direction: str,
         degrees: int,
         pose_keypoint: list | None = None,
-    ) -> tuple[torch.Tensor,]:
+    ) -> tuple[torch.Tensor, list]:
         """
         Rotate OpenPose figure(s) around torso. Processes batch of images.
+        Returns (image_tensor, rotated_pose_keypoints_list).
         """
         batch_size = image.shape[0]
         results = []
+        pose_outputs = []
 
         for i in range(batch_size):
             img = image[i].cpu().numpy()
@@ -53,15 +56,29 @@ class OpenPoseRotator:
                 else:
                     kp = pose_keypoint
 
-            out_img, success = rotate_openpose(img, kp, direction, degrees)
+            out_img, success, rotated_kp = rotate_openpose(img, kp, direction, degrees)
 
             if not success:
                 print("OpenPose Rotator: Could not detect torso. Returning input image.")
                 out_img = img
+                pose_outputs.append({"people": []})
             else:
                 # pose_utils renders BGR; convert to RGB for ComfyUI
                 if out_img.shape[2] == 3:
                     out_img = out_img[..., ::-1]
+
+                # Convert rotated keypoints to OpenPose format for output
+                openpose_dict = _keypoints_to_openpose_dict(rotated_kp) if rotated_kp else {}
+                pose_outputs.append(openpose_dict)
+
+                # Log keypoints to console for debugging
+                print(f"[OpenPose Rotator] Image {i}: rotated keypoints (direction={direction}, degrees={degrees})")
+                print(f"  body: {rotated_kp.get('body', [])}")
+                if rotated_kp.get("hand_left"):
+                    print(f"  hand_left: {rotated_kp['hand_left']}")
+                if rotated_kp.get("hand_right"):
+                    print(f"  hand_right: {rotated_kp['hand_right']}")
+                print(f"  pose_keypoints_2d (flat): {openpose_dict.get('people', [{}])[0].get('pose_keypoints_2d', [])}")
 
             # Ensure float [0,1] and 3 channels
             if out_img.dtype != np.float32:
@@ -71,7 +88,7 @@ class OpenPoseRotator:
             results.append(out_img)
 
         out_tensor = torch.from_numpy(np.stack(results, axis=0)).float()
-        return (out_tensor,)
+        return (out_tensor, pose_outputs)
 
 
 NODE_CLASS_MAPPINGS = {

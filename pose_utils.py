@@ -90,8 +90,9 @@ JOINT_COLOR_INDICES = {
     8: 6, 9: 7, 10: 8, 11: 9, 12: 10, 13: 11, 14: 12,
 }
 
-# Face and hand limbs - commented out for now, focus on main body
-# (0, 1), (0, 15), (15, 17), (0, 16), (16, 18), (2, 17), (5, 18)
+# Valid main-body keypoint indices for limb drawing. Explicitly excludes face (0, 15-18)
+# to prevent spurious connections (e.g. foot to face) when formats vary.
+MAIN_BODY_INDICES = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
 
 # Hand edges (0-indexed, 21 keypoints per hand) - used when hands enabled
 HAND_EDGES = [
@@ -99,6 +100,30 @@ HAND_EDGES = [
     (0, 9), (9, 10), (10, 11), (11, 12), (0, 13), (13, 14), (14, 15), (15, 16),
     (0, 17), (17, 18), (18, 19), (19, 20),
 ]
+
+
+def _keypoints_to_openpose_dict(
+    keypoints: dict[str, list[tuple[float, float, float]]],
+) -> dict[str, list[float]]:
+    """Convert internal keypoint dict to OpenPose/ComfyUI format (flat x,y,c arrays)."""
+    body = keypoints.get("body", [])
+    hand_left = keypoints.get("hand_left", [])
+    hand_right = keypoints.get("hand_right", [])
+    face = keypoints.get("face", [])
+
+    def flatten(pts: list[tuple[float, float, float]]) -> list[float]:
+        result = []
+        for x, y, c in pts:
+            result.extend([float(x), float(y), float(c)])
+        return result
+
+    person = {
+        "pose_keypoints_2d": flatten(body),
+        "hand_left_keypoints_2d": flatten(hand_left),
+        "hand_right_keypoints_2d": flatten(hand_right),
+        "face_keypoints_2d": flatten(face),
+    }
+    return {"people": [person]}
 
 
 def _extract_keypoint_array(flat: list[float] | None) -> list[tuple[float, float, float]]:
@@ -449,9 +474,12 @@ def render_openpose_image(
     body_depths = depths.get("body", []) if depths else []
 
     # Build limb list with depth for sorting (mean depth of endpoints)
+    # Only draw limbs between valid main-body indices - never connect to face (0, 15-18)
     limb_data: list[tuple[int, int, int, float]] = []
     for i, (a, b) in enumerate(BODY_LIMBS):
         if a >= len(body) or b >= len(body):
+            continue
+        if a not in MAIN_BODY_INDICES or b not in MAIN_BODY_INDICES:
             continue
         x1, y1, c1 = body[a]
         x2, y2, c2 = body[b]
@@ -502,10 +530,11 @@ def rotate_openpose(
     pose_keypoint: Any | None,
     direction: str,
     degrees: float,
-) -> tuple[np.ndarray, bool]:
+) -> tuple[np.ndarray, bool, dict[str, list[tuple[float, float, float]]] | None]:
     """
     Main pipeline: extract/parse keypoints, detect torso, rotate, render.
-    Returns (output_image, success). On failure, returns (input_image, False).
+    Returns (output_image, success, rotated_keypoints). On failure, returns (input_image, False, None).
+    rotated_keypoints is internal format: {"body": [(x,y,c),...], "hand_left": [...], ...}
     """
     h, w = image.shape[:2]
 
@@ -516,7 +545,7 @@ def rotate_openpose(
         keypoints = extract_keypoints_from_image(image)
 
     if keypoints is None:
-        return image, False
+        return image, False, None
 
     # Scale normalized coords to image size (ComfyUI may pass 0-1 range)
     keypoints = _scale_keypoints_to_image(keypoints, w, h)
@@ -524,7 +553,7 @@ def rotate_openpose(
     # Torso pivot
     pivot = compute_torso_pivot(keypoints)
     if pivot is None:
-        return image, False
+        return image, False, None
 
     # Rotate (returns keypoints and depth for occlusion/ordering)
     rotated, depths = rotate_keypoints_3d(keypoints, pivot, degrees, direction)
@@ -532,4 +561,4 @@ def rotate_openpose(
 
     # Render with depth-ordered drawing
     rendered = render_openpose_image(rotated, w, h, depths)
-    return rendered, True
+    return rendered, True, rotated
