@@ -47,9 +47,6 @@ BODY_DEPTH_SCALES: dict[int, float] = {
 # Default depth scale for hands (21 keypoints each - no per-index in OpenPose hand spec)
 HAND_DEPTH_SCALE = 0.45
 
-# Occlusion: points with depth below this (behind torso) get confidence zeroed
-OCCLUSION_DEPTH_THRESHOLD = -0.15
-
 # Limb connections for body (COCO format, 0-indexed)
 # Main body only - matches ControlNet/DWPose expected appearance
 # Order aligned with ControlNet util.draw_bodypose colors for consistency
@@ -400,11 +397,10 @@ def rotate_keypoints_3d(
             scale = BODY_DEPTH_SCALES.get(i, HAND_DEPTH_SCALE) if part == "body" else HAND_DEPTH_SCALE
             nx, ny, z_new = rotate_point(x, y, depth_scale * scale)
 
-            # Occlusion: hide points far behind torso
-            if z_new < OCCLUSION_DEPTH_THRESHOLD:
-                rotated.append((nx, ny, 0.0))
-            else:
-                rotated.append((nx, ny, c))
+            # Keep all points visible; depth ordering in render draws back-to-front
+            # so segments behind others (e.g. arm behind torso) are drawn first,
+            # segments in front (arm across body) are drawn on top
+            rotated.append((nx, ny, c))
             part_depths.append(z_new)
 
         result[part] = rotated
@@ -443,8 +439,9 @@ def render_openpose_image(
     depths: dict[str, list[float]] | None = None,
 ) -> np.ndarray:
     """
-    Draw OpenPose skeleton on blank canvas. Black background (matches ControlNet pose images),
-    colored limbs and joints. When depths is provided, limbs are drawn back-to-front.
+    Draw OpenPose skeleton on blank canvas. Black background (matches ControlNet pose images).
+    When depths is provided, limbs are drawn back-to-front (far first, near last) so segments
+    in front (e.g. arm reaching across body) are drawn on top of segments behind.
     """
     canvas = np.zeros((height, width, 3), dtype=np.uint8)
 
