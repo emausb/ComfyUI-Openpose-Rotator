@@ -50,43 +50,57 @@ HAND_DEPTH_SCALE = 0.45
 # Occlusion: points with depth below this (behind torso) get confidence zeroed
 OCCLUSION_DEPTH_THRESHOLD = -0.15
 
-# Limb connections for body (1-indexed in ControlNet util, we use 0-indexed)
-# limbSeq: (from_part, to_part) - 0-indexed
+# Limb connections for body (COCO format, 0-indexed)
+# Main body only - matches ControlNet/DWPose expected appearance
+# Order aligned with ControlNet util.draw_bodypose colors for consistency
 BODY_LIMBS = [
-    (1, 2),   # neck - r_shoulder
+    (1, 2),   # neck - r_shoulder  (shoulder line, red)
     (1, 5),   # neck - l_shoulder
-    (2, 3),   # r_shoulder - r_elbow
-    (3, 4),   # r_elbow - r_wrist
-    (5, 6),   # l_shoulder - l_elbow
-    (6, 7),   # l_elbow - l_wrist
-    (1, 8),   # neck - mid_hip
-    (8, 9),   # mid_hip - r_hip
+    (2, 3),   # r_shoulder - r_elbow (r arm, orange)
+    (3, 4),   # r_elbow - r_wrist   (r forearm, yellow)
+    (5, 6),   # l_shoulder - l_elbow (l arm, green)
+    (6, 7),   # l_elbow - l_wrist   (l forearm, lime)
+    (1, 8),   # neck - mid_hip      (spine, green)
+    (8, 9),   # mid_hip - r_hip     (r thigh, teal)
     (9, 10),  # r_hip - r_knee
-    (10, 11), # r_knee - r_ankle
-    (8, 12),  # mid_hip - l_hip
+    (10, 11), # r_knee - r_ankle    (r shin, light blue)
+    (8, 12),  # mid_hip - l_hip     (l thigh, dark blue)
     (12, 13), # l_hip - l_knee
-    (13, 14), # l_knee - l_ankle
-    (0, 1),   # nose - neck
-    (0, 15),  # nose - r_eye
-    (15, 17), # r_eye - r_ear
-    (0, 16),  # nose - l_eye
-    (16, 18), # l_eye - l_ear
-    (2, 17),  # r_shoulder - r_ear
-    (5, 18),  # l_shoulder - l_ear
+    (13, 14), # l_knee - l_ankle    (l shin, purple)
 ]
 
-# Hand edges (0-indexed, 21 keypoints per hand)
+# ControlNet OpenPose standard colors (BGR) - matches expected figure appearance
+# Red chest -> orange/yellow arms -> green spine -> teal/blue/purple legs
+BODY_COLORS = [
+    (0, 0, 255),     # red - neck-shoulders (chest line)
+    (0, 0, 255),
+    (0, 85, 255),    # orange - r upper arm
+    (0, 170, 255),   # yellow - r forearm
+    (0, 255, 85),    # green - l upper arm
+    (85, 255, 0),    # lime green - l forearm
+    (0, 255, 0),     # green - spine (neck to mid_hip)
+    (0, 255, 170),   # teal - r thigh
+    (0, 255, 255),   # cyan - r knee
+    (170, 255, 0),   # light blue - r shin
+    (255, 0, 0),     # blue - l thigh
+    (255, 85, 0),    # dark blue - l knee
+    (255, 0, 170),   # purple - l shin
+]
+
+# Joint index -> BODY_COLORS index for main body keypoints (1-14)
+JOINT_COLOR_INDICES = {
+    1: 0, 2: 2, 3: 2, 4: 3, 5: 4, 6: 4, 7: 5,
+    8: 6, 9: 7, 10: 8, 11: 9, 12: 10, 13: 11, 14: 12,
+}
+
+# Face and hand limbs - commented out for now, focus on main body
+# (0, 1), (0, 15), (15, 17), (0, 16), (16, 18), (2, 17), (5, 18)
+
+# Hand edges (0-indexed, 21 keypoints per hand) - used when hands enabled
 HAND_EDGES = [
     (0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
     (0, 9), (9, 10), (10, 11), (11, 12), (0, 13), (13, 14), (14, 15), (15, 16),
     (0, 17), (17, 18), (18, 19), (19, 20),
-]
-
-# Colors for body limbs (BGR for OpenCV)
-BODY_COLORS = [
-    (0, 0, 255), (0, 85, 255), (0, 170, 255), (0, 255, 255), (0, 255, 170), (0, 255, 85),
-    (0, 255, 0), (85, 255, 0), (170, 255, 0), (255, 255, 0), (255, 170, 0), (255, 85, 0),
-    (255, 0, 0), (255, 0, 85), (255, 0, 170), (255, 0, 255), (170, 0, 255), (85, 0, 255),
 ]
 
 
@@ -429,10 +443,10 @@ def render_openpose_image(
     depths: dict[str, list[float]] | None = None,
 ) -> np.ndarray:
     """
-    Draw OpenPose skeleton on blank canvas. White background, colored limbs and joints.
-    When depths is provided, limbs are drawn back-to-front for correct occlusion.
+    Draw OpenPose skeleton on blank canvas. Black background (matches ControlNet pose images),
+    colored limbs and joints. When depths is provided, limbs are drawn back-to-front.
     """
-    canvas = np.ones((height, width, 3), dtype=np.uint8) * 255
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
 
     body = keypoints.get("body", [])
     body_depths = depths.get("body", []) if depths else []
@@ -460,46 +474,28 @@ def render_openpose_image(
         cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, 4)
 
     # Draw body joints (front-facing first so they appear on top)
-    joint_data = [(i, x, y, c) for i, (x, y, c) in enumerate(body) if c > 0]
+    # Exclude face/head indices (0, 15, 16, 17, 18) - focus on main body
+    BODY_JOINT_INDICES = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+    joint_data = [
+        (i, x, y, c)
+        for i, (x, y, c) in enumerate(body)
+        if c > 0 and i in BODY_JOINT_INDICES
+    ]
     if body_depths:
         joint_data.sort(key=lambda t: -body_depths[t[0]] if t[0] < len(body_depths) else 0)
     for i, x, y, c in joint_data:
-        color = BODY_COLORS[i % len(BODY_COLORS)]
+        color_idx = JOINT_COLOR_INDICES.get(i, 0)
+        color = BODY_COLORS[color_idx]
         cv2.circle(canvas, (int(x), int(y)), 4, color, -1)
 
-    # Draw hands (with depth ordering if available)
-    for hand_key, hand_pts in [("hand_left", keypoints.get("hand_left", [])),
-                               ("hand_right", keypoints.get("hand_right", []))]:
-        if len(hand_pts) < 2:
-            continue
-        hand_depths = depths.get(hand_key, []) if depths else []
-
-        # Sort hand edges by depth for proper occlusion
-        edges_with_depth: list[tuple[int, int, float]] = []
-        for a, b in HAND_EDGES:
-            if a >= len(hand_pts) or b >= len(hand_pts):
-                continue
-            x1, y1, c1 = hand_pts[a]
-            x2, y2, c2 = hand_pts[b]
-            if c1 <= 0 or c2 <= 0:
-                continue
-            d_a = hand_depths[a] if a < len(hand_depths) else 0.0
-            d_b = hand_depths[b] if b < len(hand_depths) else 0.0
-            edges_with_depth.append((a, b, (d_a + d_b) / 2))
-        if hand_depths:
-            edges_with_depth.sort(key=lambda t: t[2])
-        for a, b, _ in edges_with_depth:
-            x1, y1, c1 = hand_pts[a]
-            x2, y2, c2 = hand_pts[b]
-            cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
-
-        joint_order = list(range(len(hand_pts)))
-        if hand_depths and len(hand_depths) == len(hand_pts):
-            joint_order.sort(key=lambda idx: -hand_depths[idx] if hand_pts[idx][2] > 0 else 999)
-        for idx in joint_order:
-            x, y, c = hand_pts[idx]
-            if c > 0:
-                cv2.circle(canvas, (int(x), int(y)), 3, (0, 0, 255), -1)
+    # Hands and face rendering - commented out to focus on main body composition
+    # for hand_key, hand_pts in [("hand_left", keypoints.get("hand_left", [])),
+    #                            ("hand_right", keypoints.get("hand_right", []))]:
+    #     if len(hand_pts) < 2:
+    #         continue
+    #     ...
+    #     cv2.line(canvas, ...)
+    #     cv2.circle(canvas, ...)
 
     return canvas
 
