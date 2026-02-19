@@ -22,10 +22,13 @@ class OpenPoseRotator:
                 "image": ("IMAGE",),
                 "direction": (["clockwise", "counterclockwise"],),
                 "degrees": ("INT", {"default": 45, "min": 1, "max": 360}),
+                "mode": (["simple", "advanced"],),
             },
             "optional": {
                 "pose_keypoint": ("POSE_KEYPOINT",),
                 "debug": ("BOOLEAN", {"default": False}),
+                "perspective": ("FLOAT", {"default": 0.0, "min": -0.5, "max": 0.5, "step": 0.01}),
+                "focal_length": ("FLOAT", {"default": 800.0, "min": 100.0, "max": 5000.0, "step": 50.0}),
             },
         }
 
@@ -34,8 +37,11 @@ class OpenPoseRotator:
         image: torch.Tensor,
         direction: str,
         degrees: int,
+        mode: str,
         pose_keypoint: list | None = None,
         debug: bool = False,
+        perspective: float = 0.0,
+        focal_length: float = 800.0,
     ) -> tuple[torch.Tensor, list]:
         """
         Rotate OpenPose figure(s) around torso. Processes batch of images.
@@ -59,7 +65,15 @@ class OpenPoseRotator:
                     kp = pose_keypoint
 
             out_img, success, rotated_kp = rotate_openpose(
-                img, kp, direction, degrees, image_index=i, debug=debug
+                img,
+                kp,
+                direction,
+                degrees,
+                image_index=i,
+                debug=debug,
+                mode=mode,
+                perspective=perspective,
+                focal_length=focal_length,
             )
 
             if not success:

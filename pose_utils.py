@@ -402,16 +402,27 @@ def _compute_adaptive_depth_scale(
     return 0.4 * (120.0 / shoulder_width)
 
 
+# Perspective scale_y: normalizes (cy - y) so perspective in [-0.5, 0.5] gives moderate effect
+PERSPECTIVE_SCALE_Y = 0.001
+
+
 def rotate_keypoints_3d(
     keypoints: dict[str, list[tuple[float, float, float]]],
     pivot: tuple[float, float],
     degrees: float,
     direction: str,
     depth_scale: float | None = None,
+    mode: str = "simple",
+    perspective: float = 0.0,
+    focal_length: float = 800.0,
 ) -> dict[str, list[tuple[float, float, float]]]:
     """
     Rotate all keypoints around Y-axis through pivot. Counterclockwise = positive angle, clockwise = negative.
     Uses limb-specific depth inference per OpenPose COCO body indices for 3D-style projection.
+
+    mode: "simple" = orthographic output with perspective-modulated depth; "advanced" = perspective projection.
+    perspective: 0 = eye level, positive = camera above (isometric), negative = camera below.
+    focal_length: (advanced only) controls perspective strength; higher = flatter, lower = more foreshortening.
     """
     theta_deg = degrees if direction == "counterclockwise" else -degrees
     theta = math.radians(theta_deg)
@@ -422,15 +433,27 @@ def rotate_keypoints_3d(
 
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
+    use_perspective_projection = mode == "advanced"
 
     def rotate_point(
         x: float, y: float, scale: float
-    ) -> tuple[float, float]:
-        # Side-aware: (x - cx) gives correct sign for left/right body sides
-        z = (x - cx) * scale
-        x_new = (x - cx) * cos_t - z * sin_t + cx
+    ) -> tuple[float, float, float]:
+        # Depth inference: x-offset + perspective term (vertical position affects depth)
+        # scale is already depth_scale * limb_scale from caller
+        z = (x - cx) * scale + perspective * (cy - y) * PERSPECTIVE_SCALE_Y
+        # Y-axis rotation in XZ plane (y unchanged in 3D)
+        x_rot = (x - cx) * cos_t - z * sin_t
+        z_rot = (x - cx) * sin_t + z * cos_t
+        y_rot = y - cy
+        if use_perspective_projection:
+            z_cam = focal_length + z_rot
+            z_cam = max(z_cam, 0.1 * focal_length)  # avoid extreme magnification
+            x_proj = cx + focal_length * x_rot / z_cam
+            y_proj = cy + focal_length * y_rot / z_cam
+            return (x_proj, y_proj, z_rot)
+        x_new = x_rot + cx
         y_new = y
-        return (x_new, y_new)
+        return (x_new, y_new, z_rot)
 
     result: dict[str, list[tuple[float, float, float]]] = {}
 
@@ -448,7 +471,7 @@ def rotate_keypoints_3d(
                 scale = FACE_DEPTH_SCALE
             else:
                 scale = HAND_DEPTH_SCALE
-            nx, ny = rotate_point(x, y, depth_scale * scale)
+            nx, ny, _ = rotate_point(x, y, depth_scale * scale)
             rotated.append((nx, ny, c))
 
         result[part] = rotated
@@ -667,12 +690,17 @@ def rotate_openpose(
     degrees: float,
     image_index: int = 0,
     debug: bool = False,
+    mode: str = "simple",
+    perspective: float = 0.0,
+    focal_length: float = 800.0,
 ) -> tuple[np.ndarray, bool, dict[str, list[tuple[float, float, float]]] | None]:
     """
     Main pipeline: extract/parse keypoints, detect torso, rotate, render.
     Returns (output_image, success, rotated_keypoints). On failure, returns (input_image, False, None).
     rotated_keypoints is internal format: {"body": [(x,y,c),...], "hand_left": [...], ...}
     image_index: used for console logging when processing batches.
+    mode: "simple" or "advanced". perspective: 0=eye level, >0=camera above, <0=camera below.
+    focal_length: (advanced only) perspective strength; higher=flatter.
     """
     h, w = image.shape[:2]
 
@@ -701,7 +729,15 @@ def rotate_openpose(
         return image, False, None
 
     # Rotate keypoints around torso pivot
-    rotated = rotate_keypoints_3d(keypoints, pivot, degrees, direction)
+    rotated = rotate_keypoints_3d(
+        keypoints,
+        pivot,
+        degrees,
+        direction,
+        mode=mode,
+        perspective=perspective,
+        focal_length=focal_length,
+    )
     rotated = join_broken_segments(rotated, 0.0)
 
     # Position by anchor: align neck/shoulders with original figure position
