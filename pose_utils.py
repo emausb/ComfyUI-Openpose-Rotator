@@ -47,10 +47,14 @@ BODY_DEPTH_SCALES: dict[int, float] = {
 # Default depth scale for hands (21 keypoints each - no per-index in OpenPose hand spec)
 HAND_DEPTH_SCALE = 0.45
 
-# Static limb definitions: (a, b) connection, draw layer (0=torso first, 4=feet last), color index
-# Connections never change; draw order is anatomical (torso -> arms -> legs)
+# Static limb definitions: (a, b) connection, draw layer (0=head first, 4=feet last), color index
+# Connections never change; draw order is anatomical (head -> torso -> arms -> legs)
 BODY_LIMBS = [
     ((0, 1), 0, 0),   # nose - neck (head)
+    ((0, 15), 0, 0),  # nose - r_eye
+    ((0, 16), 0, 0),  # nose - l_eye
+    ((15, 17), 0, 0), # r_eye - r_ear
+    ((16, 18), 0, 0),# l_eye - l_ear
     ((1, 2), 0, 0),   # neck - r_shoulder
     ((1, 5), 0, 0),   # neck - l_shoulder
     ((2, 3), 1, 2),   # r_shoulder - r_elbow
@@ -87,14 +91,14 @@ BODY_COLORS = [
 # Static joint definitions: index -> (draw layer, color index)
 # Draw order is anatomical (head -> torso -> arms -> legs)
 JOINT_LAYERS = {
-    0: (0, 0),   # nose - head
+    0: (0, 0),   # nose
     1: (0, 0), 2: (1, 2), 3: (1, 2), 4: (1, 3), 5: (1, 4), 6: (1, 4), 7: (1, 5), 8: (0, 6),
     9: (2, 7), 10: (2, 8), 11: (3, 9), 12: (2, 10), 13: (2, 11), 14: (3, 12),
+    15: (0, 0), 16: (0, 0), 17: (0, 0), 18: (0, 0),  # r_eye, l_eye, r_ear, l_ear
 }
 
-# Valid main-body keypoint indices for limb drawing. Explicitly excludes face (15-18)
-# to prevent spurious connections when formats vary. Includes 0 (nose) for head-neck limb.
-MAIN_BODY_INDICES = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+# Valid keypoint indices for limb drawing (body 0-18, COCO format)
+MAIN_BODY_INDICES = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}
 
 # Hand edges (0-indexed, 21 keypoints per hand) - used when hands enabled
 HAND_EDGES = [
@@ -546,18 +550,20 @@ def render_openpose_image(
         limb_len = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
         if limb_len > max_limb_len:
             continue
-        mean_x = (x1 + x2) / 2
-        limb_data.append((a, b, layer, color_idx, mean_x))
+        # Use max_x: limbs extending right (front when rotated) drawn last
+        max_x = max(x1, x2)
+        limb_data.append((a, b, layer, color_idx, max_x))
 
-    # Draw limbs: anatomical layer first, then left-to-right (back-to-front for rotated view)
+    # Draw limbs: neutral gray (color is on nodes for debugging)
     limb_data.sort(key=lambda t: (t[2], t[4]))
-    for a, b, _, color_idx, _ in limb_data:
+    limb_color = (128, 128, 128)  # gray
+    for a, b, _, _, _ in limb_data:
         x1, y1, c1 = body[a]
         x2, y2, c2 = body[b]
-        color = BODY_COLORS[color_idx % len(BODY_COLORS)]
-        cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, 4)
+        cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), limb_color, 2)
 
-    # Draw joints: anatomical layer first, then left-to-right (back-to-front for rotated view)
+    # Draw joints: colored by index, twice as large for debugging
+    joint_radius = 8
     joint_data = [
         (i, x, y, c)
         for i, (x, y, c) in enumerate(body)
@@ -567,7 +573,7 @@ def render_openpose_image(
     for i, x, y, c in joint_data:
         _, color_idx = JOINT_LAYERS.get(i, (0, 0))
         color = BODY_COLORS[color_idx]
-        cv2.circle(canvas, (int(x), int(y)), 4, color, -1)
+        cv2.circle(canvas, (int(x), int(y)), joint_radius, color, -1)
 
     # Hands and face rendering - commented out to focus on main body composition
     # for hand_key, hand_pts in [("hand_left", keypoints.get("hand_left", [])),
