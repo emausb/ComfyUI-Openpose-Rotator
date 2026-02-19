@@ -1,11 +1,11 @@
 # OpenPose Rotator
 
-A ComfyUI custom node that rotates OpenPose figures around their torso pivot point. The node accepts an image and optional pose keypoints, detects the torso, applies Y-axis rotation (left/right), and outputs the rotated pose image.
+A ComfyUI custom node that rotates OpenPose figures around their torso pivot point. The node accepts an image and optional pose keypoints, detects the torso, applies Y-axis rotation (clockwise/counterclockwise), and outputs the rotated pose image.
 
 ## Features
 
 - **Input**: Image (required) + optional POSE_KEYPOINT from OpenPose/DWPose preprocessors
-- **Parameters**: Direction (left/right), degrees (1-360)
+- **Parameters**: Direction (clockwise/counterclockwise), degrees (1-360)
 - **Fallback**: When POSE_KEYPOINT is not provided, uses DWPose from comfyui-controlnet-aux to extract keypoints (requires that extension)
 - **Error handling**: Returns input image unchanged if torso cannot be detected
 - **Anatomy-aware rotation**: Limb-specific depth scales per OpenPose COCO body indices for more natural turns
@@ -33,7 +33,7 @@ A ComfyUI custom node that rotates OpenPose figures around their torso pivot poi
 1. Add **OpenPose Rotator** from the node menu under **image/pose**
 2. Connect an OpenPose/DWPose image to the `image` input
 3. Optionally connect POSE_KEYPOINT from DWPose Estimator or OpenPose Pose for better accuracy
-4. Set `direction` (left = counterclockwise, right = clockwise when viewed from above)
+4. Set `direction` (counterclockwise or clockwise, when viewed from above)
 5. Set `degrees` (1-360)
 
 ## Workflow Example

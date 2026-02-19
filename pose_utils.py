@@ -16,8 +16,10 @@ import numpy as np
 # 15=r_eye, 16=l_eye, 17=r_ear, 18=l_ear
 TORSO_INDICES = [1, 2, 5, 8, 9, 12]  # neck, shoulders, mid_hip, hips
 
-# Face/head keypoints (hidden when rotated >90° - back of head visible)
+# Face/head keypoints (hidden when rotated >150° - back of head visible)
+# Keeps face visible when facing to the side (~90°) so at least one eye remains
 FACE_INDICES = {0, 15, 16, 17, 18}
+FACE_HIDE_ANGLE = 150  # degrees - hide face only when head is turned away
 
 # Limb-specific depth scales (OpenPose COCO body indices 0-18)
 # Torso compact; arms/legs extend further; head moderate
@@ -390,10 +392,10 @@ def rotate_keypoints_3d(
     depth_scale: float | None = None,
 ) -> dict[str, list[tuple[float, float, float]]]:
     """
-    Rotate all keypoints around Y-axis through pivot. Left = positive angle (CCW), right = negative.
+    Rotate all keypoints around Y-axis through pivot. Counterclockwise = positive angle, clockwise = negative.
     Uses limb-specific depth inference per OpenPose COCO body indices for 3D-style projection.
     """
-    theta_deg = degrees if direction == "left" else -degrees
+    theta_deg = degrees if direction == "counterclockwise" else -degrees
     theta = math.radians(theta_deg)
     cx, cy = pivot
 
@@ -428,8 +430,8 @@ def rotate_keypoints_3d(
 
         result[part] = rotated
 
-    # Face visibility: when rotated >90°, hide face/head keypoints (back of head)
-    if abs(theta_deg) >= 90:
+    # Face visibility: when rotated past threshold, hide face/head keypoints (back of head)
+    if abs(theta_deg) >= FACE_HIDE_ANGLE:
         if "body" in result:
             body = result["body"]
             for idx in FACE_INDICES:

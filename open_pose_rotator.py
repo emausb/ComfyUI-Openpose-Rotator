@@ -20,7 +20,7 @@ class OpenPoseRotator:
         return {
             "required": {
                 "image": ("IMAGE",),
-                "direction": (["left", "right"],),
+                "direction": (["clockwise", "counterclockwise"],),
                 "degrees": ("INT", {"default": 45, "min": 1, "max": 360}),
             },
             "optional": {
