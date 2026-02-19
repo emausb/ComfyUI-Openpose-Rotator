@@ -477,25 +477,28 @@ def _fit_and_center_keypoints_on_canvas(
 
     min_x, max_x = min(xs), max(xs)
     min_y, max_y = min(ys), max(ys)
-    bbox_w = max_x - min_x
-    bbox_h = max_y - min_y
-
-    # Usable canvas with padding
-    pad_w = width * padding
-    pad_h = height * padding
-    usable_w = width - 2 * pad_w
-    usable_h = height - 2 * pad_h
-
-    # Scale down if figure exceeds canvas
-    scale = 1.0
-    if bbox_w > usable_w and usable_w > 0:
-        scale = min(scale, usable_w / bbox_w)
-    if bbox_h > usable_h and usable_h > 0:
-        scale = min(scale, usable_h / bbox_h)
 
     # Centroid (stays fixed when scaling around it)
     cx = all_x / total_conf
     cy = all_y / total_conf
+
+    # Max extent from centroid in each direction (we center the centroid, so we must fit
+    # the larger of the two sides; using bbox_h/2 fails when centroid is off-center)
+    extent_x = max(cx - min_x, max_x - cx)
+    extent_y = max(cy - min_y, max_y - cy)
+
+    # Usable canvas with padding (half-extent each side of center)
+    pad_w = width * padding
+    pad_h = height * padding
+    usable_half_w = (width - 2 * pad_w) / 2.0
+    usable_half_h = (height - 2 * pad_h) / 2.0
+
+    # Scale down so extent from centroid fits within usable half-canvas
+    scale = 1.0
+    if extent_x > usable_half_w and usable_half_w > 0:
+        scale = min(scale, usable_half_w / extent_x)
+    if extent_y > usable_half_h and usable_half_h > 0:
+        scale = min(scale, usable_half_h / extent_y)
     target_x = width / 2.0
     target_y = height / 2.0
     dx = target_x - cx
