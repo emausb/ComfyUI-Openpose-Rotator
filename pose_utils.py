@@ -50,6 +50,7 @@ HAND_DEPTH_SCALE = 0.45
 # Static limb definitions: (a, b) connection, draw layer (0=torso first, 4=feet last), color index
 # Connections never change; draw order is anatomical (torso -> arms -> legs)
 BODY_LIMBS = [
+    ((0, 1), 0, 0),   # nose - neck (head)
     ((1, 2), 0, 0),   # neck - r_shoulder
     ((1, 5), 0, 0),   # neck - l_shoulder
     ((2, 3), 1, 2),   # r_shoulder - r_elbow
@@ -84,15 +85,16 @@ BODY_COLORS = [
 ]
 
 # Static joint definitions: index -> (draw layer, color index)
-# Draw order is anatomical (torso -> arms -> legs)
+# Draw order is anatomical (head -> torso -> arms -> legs)
 JOINT_LAYERS = {
+    0: (0, 0),   # nose - head
     1: (0, 0), 2: (1, 2), 3: (1, 2), 4: (1, 3), 5: (1, 4), 6: (1, 4), 7: (1, 5), 8: (0, 6),
     9: (2, 7), 10: (2, 8), 11: (3, 9), 12: (2, 10), 13: (2, 11), 14: (3, 12),
 }
 
-# Valid main-body keypoint indices for limb drawing. Explicitly excludes face (0, 15-18)
-# to prevent spurious connections (e.g. foot to face) when formats vary.
-MAIN_BODY_INDICES = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+# Valid main-body keypoint indices for limb drawing. Explicitly excludes face (15-18)
+# to prevent spurious connections when formats vary. Includes 0 (nose) for head-neck limb.
+MAIN_BODY_INDICES = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
 
 # Hand edges (0-indexed, 21 keypoints per hand) - used when hands enabled
 HAND_EDGES = [
@@ -531,7 +533,7 @@ def render_openpose_image(
     diag = (width**2 + height**2) ** 0.5
     max_limb_len = diag * max_limb_ratio
 
-    limb_data: list[tuple[int, int, int, int]] = []
+    limb_data: list[tuple[int, int, int, int, float]] = []
     for i, ((a, b), layer, color_idx) in enumerate(BODY_LIMBS):
         if a >= len(body) or b >= len(body):
             continue
@@ -544,23 +546,24 @@ def render_openpose_image(
         limb_len = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
         if limb_len > max_limb_len:
             continue
-        limb_data.append((a, b, layer, color_idx))
+        mean_x = (x1 + x2) / 2
+        limb_data.append((a, b, layer, color_idx, mean_x))
 
-    # Draw limbs in static anatomical order (torso -> arms -> legs)
-    limb_data.sort(key=lambda t: t[2])
-    for a, b, _, color_idx in limb_data:
+    # Draw limbs: anatomical layer first, then left-to-right (back-to-front for rotated view)
+    limb_data.sort(key=lambda t: (t[2], t[4]))
+    for a, b, _, color_idx, _ in limb_data:
         x1, y1, c1 = body[a]
         x2, y2, c2 = body[b]
         color = BODY_COLORS[color_idx % len(BODY_COLORS)]
         cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, 4)
 
-    # Draw joints in static anatomical order
+    # Draw joints: anatomical layer first, then left-to-right (back-to-front for rotated view)
     joint_data = [
         (i, x, y, c)
         for i, (x, y, c) in enumerate(body)
         if c > 0 and i in JOINT_LAYERS
     ]
-    joint_data.sort(key=lambda t: JOINT_LAYERS.get(t[0], (0, 0))[0])
+    joint_data.sort(key=lambda t: (JOINT_LAYERS.get(t[0], (0, 0))[0], t[1]))
     for i, x, y, c in joint_data:
         _, color_idx = JOINT_LAYERS.get(i, (0, 0))
         color = BODY_COLORS[color_idx]
@@ -583,11 +586,13 @@ def rotate_openpose(
     pose_keypoint: Any | None,
     direction: str,
     degrees: float,
+    image_index: int = 0,
 ) -> tuple[np.ndarray, bool, dict[str, list[tuple[float, float, float]]] | None]:
     """
     Main pipeline: extract/parse keypoints, detect torso, rotate, render.
     Returns (output_image, success, rotated_keypoints). On failure, returns (input_image, False, None).
     rotated_keypoints is internal format: {"body": [(x,y,c),...], "hand_left": [...], ...}
+    image_index: used for console logging when processing batches.
     """
     h, w = image.shape[:2]
 
@@ -603,6 +608,12 @@ def rotate_openpose(
     # Scale normalized coords to image size (ComfyUI may pass 0-1 range)
     keypoints = _scale_keypoints_to_image(keypoints, w, h)
 
+    # Console: pre-rotated figure (before rotation, after scaling)
+    pre_dict = _keypoints_to_openpose_dict(keypoints)
+    print(f"[OpenPose Rotator] Image {image_index} PRE-ROTATED (direction={direction}, degrees={degrees}):")
+    print(f"  body: {keypoints.get('body', [])}")
+    print(f"  pose_keypoints_2d (flat): {pre_dict.get('people', [{}])[0].get('pose_keypoints_2d', [])}")
+
     # Torso pivot
     pivot = compute_torso_pivot(keypoints)
     if pivot is None:
@@ -614,6 +625,12 @@ def rotate_openpose(
 
     # Scale to fit and center figure (prevents feet/head cutoff, fixes right/left bias)
     rotated = _fit_and_center_keypoints_on_canvas(rotated, w, h)
+
+    # Console: post-rotated figure (after rotation, fit, and center)
+    post_dict = _keypoints_to_openpose_dict(rotated)
+    print(f"[OpenPose Rotator] Image {image_index} POST-ROTATED (direction={direction}, degrees={degrees}):")
+    print(f"  body: {rotated.get('body', [])}")
+    print(f"  pose_keypoints_2d (flat): {post_dict.get('people', [{}])[0].get('pose_keypoints_2d', [])}")
 
     # Render using static connection and draw-order definitions
     rendered = render_openpose_image(rotated, w, h)

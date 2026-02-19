@@ -56,7 +56,7 @@ class OpenPoseRotator:
                 else:
                     kp = pose_keypoint
 
-            out_img, success, rotated_kp = rotate_openpose(img, kp, direction, degrees)
+            out_img, success, rotated_kp = rotate_openpose(img, kp, direction, degrees, image_index=i)
 
             if not success:
                 print("OpenPose Rotator: Could not detect torso. Returning input image.")
@@ -71,14 +71,7 @@ class OpenPoseRotator:
                 openpose_dict = _keypoints_to_openpose_dict(rotated_kp) if rotated_kp else {}
                 pose_outputs.append(openpose_dict)
 
-                # Log keypoints to console for debugging
-                print(f"[OpenPose Rotator] Image {i}: rotated keypoints (direction={direction}, degrees={degrees})")
-                print(f"  body: {rotated_kp.get('body', [])}")
-                if rotated_kp.get("hand_left"):
-                    print(f"  hand_left: {rotated_kp['hand_left']}")
-                if rotated_kp.get("hand_right"):
-                    print(f"  hand_right: {rotated_kp['hand_right']}")
-                print(f"  pose_keypoints_2d (flat): {openpose_dict.get('people', [{}])[0].get('pose_keypoints_2d', [])}")
+                # Pre/post keypoints are logged by rotate_openpose in pose_utils
 
             # Ensure float [0,1] and 3 channels
             if out_img.dtype != np.float32:
