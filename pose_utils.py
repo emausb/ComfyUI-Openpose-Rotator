@@ -49,6 +49,9 @@ BODY_DEPTH_SCALES: dict[int, float] = {
 # Default depth scale for hands (21 keypoints each - no per-index in OpenPose hand spec)
 HAND_DEPTH_SCALE = 0.45
 
+# Face mesh (70 keypoints) - same region as head; use head-like depth so face rotates with skull
+FACE_DEPTH_SCALE = 0.30
+
 # Static limb definitions: (a, b) connection, draw layer (0=head first, 4=feet last), color index
 # Connections never change; draw order is anatomical (head -> torso -> arms -> legs)
 BODY_LIMBS = [
@@ -107,6 +110,21 @@ HAND_EDGES = [
     (0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
     (0, 9), (9, 10), (10, 11), (11, 12), (0, 13), (13, 14), (14, 15), (15, 16),
     (0, 17), (17, 18), (18, 19), (19, 20),
+]
+
+# Face mesh edges (0-indexed, 70 keypoints) - OpenPose FACE_PAIRS_RENDER from faceParameters.hpp
+FACE_EDGES = [
+    (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7), (7, 8), (8, 9), (9, 10),
+    (10, 11), (11, 12), (12, 13), (13, 14), (14, 15), (15, 16),
+    (17, 18), (18, 19), (19, 20), (20, 21),
+    (22, 23), (23, 24), (24, 25), (25, 26),
+    (27, 28), (28, 29), (29, 30),
+    (31, 32), (32, 33), (33, 34), (34, 35),
+    (36, 37), (37, 38), (38, 39), (39, 40), (40, 41), (41, 36),
+    (42, 43), (43, 44), (44, 45), (45, 46), (46, 47), (47, 42),
+    (48, 49), (49, 50), (50, 51), (51, 52), (52, 53), (53, 54), (54, 55), (55, 56),
+    (56, 57), (57, 58), (58, 59), (59, 48),
+    (60, 61), (61, 62), (62, 63), (63, 64), (64, 65), (65, 66), (66, 67), (67, 60),
 ]
 
 
@@ -424,7 +442,12 @@ def rotate_keypoints_3d(
                 rotated.append((x, y, c))
                 continue
 
-            scale = BODY_DEPTH_SCALES.get(i, HAND_DEPTH_SCALE) if part == "body" else HAND_DEPTH_SCALE
+            if part == "body":
+                scale = BODY_DEPTH_SCALES.get(i, HAND_DEPTH_SCALE)
+            elif part == "face":
+                scale = FACE_DEPTH_SCALE
+            else:
+                scale = HAND_DEPTH_SCALE
             nx, ny = rotate_point(x, y, depth_scale * scale)
             rotated.append((nx, ny, c))
 
@@ -592,14 +615,47 @@ def render_openpose_image(
         axis_xi = int(round(axis_x))
         _draw_dashed_vertical_line(canvas, axis_xi, (255, 255, 255), thickness=1)
 
-    # Hands and face rendering - commented out to focus on main body composition
-    # for hand_key, hand_pts in [("hand_left", keypoints.get("hand_left", [])),
-    #                            ("hand_right", keypoints.get("hand_right", []))]:
-    #     if len(hand_pts) < 2:
-    #         continue
-    #     ...
-    #     cv2.line(canvas, ...)
-    #     cv2.circle(canvas, ...)
+    # Face mesh (OpenPose 70-point) - draw before hands so body/face compose first
+    face_pts = keypoints.get("face", [])
+    if len(face_pts) >= 2:
+        face_color = (180, 180, 180)  # light gray
+        face_max_len = diag * 0.4
+        for a, b in FACE_EDGES:
+            if a >= len(face_pts) or b >= len(face_pts):
+                continue
+            x1, y1, c1 = face_pts[a]
+            x2, y2, c2 = face_pts[b]
+            if c1 <= 0 or c2 <= 0:
+                continue
+            limb_len = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+            if limb_len > face_max_len:
+                continue
+            cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), face_color, 1)
+        # Draw face keypoints (small circles)
+        for x, y, c in face_pts:
+            if c > 0:
+                cv2.circle(canvas, (int(x), int(y)), 2, face_color, -1)
+
+    # Hands (21 keypoints each)
+    hand_color = (150, 150, 150)
+    hand_max_len = diag * 0.3
+    for hand_pts in [keypoints.get("hand_left", []), keypoints.get("hand_right", [])]:
+        if len(hand_pts) < 2:
+            continue
+        for a, b in HAND_EDGES:
+            if a >= len(hand_pts) or b >= len(hand_pts):
+                continue
+            x1, y1, c1 = hand_pts[a]
+            x2, y2, c2 = hand_pts[b]
+            if c1 <= 0 or c2 <= 0:
+                continue
+            limb_len = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+            if limb_len > hand_max_len:
+                continue
+            cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), hand_color, 1)
+        for x, y, c in hand_pts:
+            if c > 0:
+                cv2.circle(canvas, (int(x), int(y)), 2, hand_color, -1)
 
     return canvas
 
