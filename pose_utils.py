@@ -183,7 +183,9 @@ def _scale_keypoints_to_image(
     if max_x <= 1.5 and max_y <= 1.5 and min_x >= -0.1 and min_y >= -0.1:
         scale_x, scale_y = width, height
     # Pixel coords from smaller resolution (e.g. DWPose at 384)
-    elif max_x < width * 0.95 or max_y < height * 0.95:
+    # Only scale when max is clearly from a smaller resolution; avoid scaling when
+    # the figure is already at image size but doesn't fill the frame (causes ~40% blow-up)
+    elif max_x < width * 0.76 and max_y < height * 0.76:
         scale_x = width / max(max_x, 1)
         scale_y = height / max(max_y, 1)
         if abs(scale_x - 1.0) < 0.01 and abs(scale_y - 1.0) < 0.01:
@@ -446,14 +448,15 @@ def rotate_keypoints_3d(
     return result, depths
 
 
-def _center_keypoints_on_canvas(
+def _fit_and_center_keypoints_on_canvas(
     keypoints: dict[str, list[tuple[float, float, float]]],
     width: int,
     height: int,
+    padding: float = 0.05,
 ) -> dict[str, list[tuple[float, float, float]]]:
     """
-    Translate keypoints so the figure centroid aligns with image center.
-    Fixes figure being pushed to one side after rotation.
+    Scale keypoints to fit within canvas (if they exceed bounds), then center.
+    Prevents feet/head from being cut off when the figure is taller than the image.
     """
     all_x, all_y, total_conf = 0.0, 0.0, 0.0
     for pts in keypoints.values():
@@ -466,6 +469,31 @@ def _center_keypoints_on_canvas(
     if total_conf <= 0:
         return keypoints
 
+    # Bounding box of visible keypoints
+    xs = [x for pts in keypoints.values() for x, y, c in pts if c > 0]
+    ys = [y for pts in keypoints.values() for x, y, c in pts if c > 0]
+    if not xs or not ys:
+        return keypoints
+
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    bbox_w = max_x - min_x
+    bbox_h = max_y - min_y
+
+    # Usable canvas with padding
+    pad_w = width * padding
+    pad_h = height * padding
+    usable_w = width - 2 * pad_w
+    usable_h = height - 2 * pad_h
+
+    # Scale down if figure exceeds canvas
+    scale = 1.0
+    if bbox_w > usable_w and usable_w > 0:
+        scale = min(scale, usable_w / bbox_w)
+    if bbox_h > usable_h and usable_h > 0:
+        scale = min(scale, usable_h / bbox_h)
+
+    # Centroid (stays fixed when scaling around it)
     cx = all_x / total_conf
     cy = all_y / total_conf
     target_x = width / 2.0
@@ -475,7 +503,10 @@ def _center_keypoints_on_canvas(
 
     result: dict[str, list[tuple[float, float, float]]] = {}
     for part, pts in keypoints.items():
-        result[part] = [(x + dx, y + dy, c) for x, y, c in pts]
+        result[part] = [
+            (cx + (x - cx) * scale + dx, cy + (y - cy) * scale + dy, c)
+            for x, y, c in pts
+        ]
     return result
 
 
@@ -602,8 +633,8 @@ def rotate_openpose(
     rotated, depths = rotate_keypoints_3d(keypoints, pivot, degrees, direction)
     rotated = join_broken_segments(rotated, 0.0)
 
-    # Center figure in output canvas (fixes right/left bias after rotation)
-    rotated = _center_keypoints_on_canvas(rotated, w, h)
+    # Scale to fit and center figure (prevents feet/head cutoff, fixes right/left bias)
+    rotated = _fit_and_center_keypoints_on_canvas(rotated, w, h)
 
     # Render with depth-ordered drawing
     rendered = render_openpose_image(rotated, w, h, depths)
