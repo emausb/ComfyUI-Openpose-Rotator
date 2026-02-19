@@ -406,6 +406,50 @@ def _compute_adaptive_depth_scale(
 # Main z ~ (x-cx)*scale is typically 10-40. For perspective term to matter: e.g. 0.3*200*k ~ 5 => k ~ 0.08
 PERSPECTIVE_SCALE_Y = 0.05
 
+# Ankle y-parity threshold: fraction of figure height (neck→lower ankle) within which both ankles
+# are considered to be at the same elevation (standing upright on flat ground).
+UPRIGHT_ANKLE_THRESHOLD = 0.08
+
+
+def _detect_upright_figure(
+    keypoints: dict[str, list[tuple[float, float, float]]],
+) -> tuple[bool, tuple[float, float, float] | None, tuple[float, float, float] | None]:
+    """
+    Return (is_upright, neck_pt, ankle_mid_pt).
+    Upright is True when neck (1) and both ankles (11=r, 14=l) are detected and both ankle y values
+    differ by less than UPRIGHT_ANKLE_THRESHOLD * figure_height (neck y to lower ankle y).
+    """
+    body = keypoints.get("body", [])
+
+    def get_pt(idx: int) -> tuple[float, float, float] | None:
+        if idx >= len(body):
+            return None
+        x, y, c = body[idx]
+        return (x, y, c) if c > 0 else None
+
+    neck = get_pt(1)
+    r_ankle = get_pt(11)
+    l_ankle = get_pt(14)
+
+    if neck is None or r_ankle is None or l_ankle is None:
+        return False, None, None
+
+    lower_ankle_y = max(r_ankle[1], l_ankle[1])
+    figure_height = abs(lower_ankle_y - neck[1])
+    if figure_height < 1:
+        return False, None, None
+
+    ankle_y_diff = abs(r_ankle[1] - l_ankle[1])
+    if ankle_y_diff > UPRIGHT_ANKLE_THRESHOLD * figure_height:
+        return False, None, None
+
+    ankle_mid: tuple[float, float, float] = (
+        (r_ankle[0] + l_ankle[0]) / 2,
+        (r_ankle[1] + l_ankle[1]) / 2,
+        1.0,
+    )
+    return True, neck, ankle_mid
+
 
 def rotate_keypoints_3d(
     keypoints: dict[str, list[tuple[float, float, float]]],
@@ -424,6 +468,10 @@ def rotate_keypoints_3d(
     mode: "simple" = orthographic output with perspective-modulated depth; "advanced" = perspective projection.
     perspective: 0 = eye level, positive = camera above (isometric), negative = camera below.
     focal_length: (advanced only) controls perspective strength; higher = flatter, lower = more foreshortening.
+
+    In advanced mode, when the figure is detected as standing upright (neck + matching-y ankles),
+    the rotation axis is the 3D spine computed from the ankle midpoint through the neck rather than
+    a pure vertical Y-axis. This keeps the neck stationary and tilts the axis to match the figure's lean.
     """
     theta_deg = degrees if direction == "counterclockwise" else -degrees
     theta = math.radians(theta_deg)
@@ -436,25 +484,79 @@ def rotate_keypoints_3d(
     sin_t = math.sin(theta)
     use_perspective_projection = mode == "advanced"
 
+    # --- Advanced mode: detect upright figure and build spine axis ---
+    # axis_point and axis_dir are in pivot-relative 3D space (origin = pivot).
+    axis_point: np.ndarray | None = None
+    axis_dir: np.ndarray | None = None
+
+    if mode == "advanced":
+        is_upright, neck_pt, ankle_mid_pt = _detect_upright_figure(keypoints)
+        if is_upright and neck_pt is not None and ankle_mid_pt is not None:
+            def _infer_z(px: float, py: float, limb_scale: float) -> float:
+                return (px - cx) * depth_scale * limb_scale + perspective * (cy - py) * PERSPECTIVE_SCALE_Y
+
+            # Neck 3D (pivot-relative)
+            nz = _infer_z(neck_pt[0], neck_pt[1], BODY_DEPTH_SCALES.get(1, 0.20))
+            neck_3d = np.array([neck_pt[0] - cx, neck_pt[1] - cy, nz])
+
+            # Ankle midpoint 3D (pivot-relative) — average depth of both ankles
+            r_scale = BODY_DEPTH_SCALES.get(11, 0.50)
+            l_scale = BODY_DEPTH_SCALES.get(14, 0.50)
+            body = keypoints.get("body", [])
+            r_ankle = body[11]
+            l_ankle = body[14]
+            z_r = _infer_z(r_ankle[0], r_ankle[1], r_scale)
+            z_l = _infer_z(l_ankle[0], l_ankle[1], l_scale)
+            ankle_3d = np.array([
+                ankle_mid_pt[0] - cx,
+                ankle_mid_pt[1] - cy,
+                (z_r + z_l) / 2,
+            ])
+
+            spine = neck_3d - ankle_3d
+            spine_norm = float(np.linalg.norm(spine))
+            if spine_norm > 1e-6:
+                axis_dir = spine / spine_norm
+                axis_point = neck_3d  # axis passes through neck
+
+    def _infer_z_point(x: float, y: float, scale: float) -> float:
+        # scale is depth_scale * limb_scale
+        return (x - cx) * scale + perspective * (cy - y) * PERSPECTIVE_SCALE_Y
+
     def rotate_point(
         x: float, y: float, scale: float
     ) -> tuple[float, float, float]:
-        # Depth inference: x-offset + perspective term (vertical position affects depth)
-        # scale is already depth_scale * limb_scale from caller
-        z = (x - cx) * scale + perspective * (cy - y) * PERSPECTIVE_SCALE_Y
-        # Y-axis rotation in XZ plane (y unchanged in 3D)
+        z = _infer_z_point(x, y, scale)
+
+        if axis_dir is not None and axis_point is not None:
+            # Rodrigues rotation around the spine axis (advanced + upright)
+            p = np.array([x - cx, y - cy, z])
+            p_rel = p - axis_point
+            k = axis_dir
+            p_rot = (p_rel * cos_t
+                     + np.cross(k, p_rel) * sin_t
+                     + k * float(np.dot(k, p_rel)) * (1.0 - cos_t))
+            p_world = p_rot + axis_point
+            x_rot, y_rot_3d, z_rot = float(p_world[0]), float(p_world[1]), float(p_world[2])
+            if use_perspective_projection:
+                z_cam = focal_length + z_rot
+                z_cam = max(z_cam, 0.1 * focal_length)
+                return (cx + focal_length * x_rot / z_cam,
+                        cy + focal_length * y_rot_3d / z_cam,
+                        z_rot)
+            return (x_rot + cx, y_rot_3d + cy, z_rot)
+
+        # Default: Y-axis rotation in XZ plane (simple mode or non-upright advanced)
         x_rot = (x - cx) * cos_t - z * sin_t
         z_rot = (x - cx) * sin_t + z * cos_t
         y_rot = y - cy
         if use_perspective_projection:
             z_cam = focal_length + z_rot
-            z_cam = max(z_cam, 0.1 * focal_length)  # avoid extreme magnification
-            x_proj = cx + focal_length * x_rot / z_cam
-            y_proj = cy + focal_length * y_rot / z_cam
-            return (x_proj, y_proj, z_rot)
-        x_new = x_rot + cx
-        y_new = y
-        return (x_new, y_new, z_rot)
+            z_cam = max(z_cam, 0.1 * focal_length)
+            return (cx + focal_length * x_rot / z_cam,
+                    cy + focal_length * y_rot / z_cam,
+                    z_rot)
+        return (x_rot + cx, y, z_rot)
 
     result: dict[str, list[tuple[float, float, float]]] = {}
 
