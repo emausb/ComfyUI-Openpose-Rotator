@@ -445,70 +445,61 @@ def rotate_keypoints_3d(
     return result
 
 
-def _fit_and_center_keypoints_on_canvas(
-    keypoints: dict[str, list[tuple[float, float, float]]],
-    width: int,
-    height: int,
-    padding: float = 0.05,
+def _get_anchor_point(keypoints: dict[str, list[tuple[float, float, float]]]) -> tuple[float, float] | None:
+    """
+    Get anchor point from body keypoints for positioning.
+    Prefer neck (1); if missing, use midpoint of shoulders (2, 5); if only one shoulder, use it.
+    Returns (x, y) or None if insufficient keypoints.
+    """
+    body = keypoints.get("body", [])
+    if len(body) < 2:
+        return None
+
+    def get_pt(idx: int) -> tuple[float, float] | None:
+        if idx >= len(body):
+            return None
+        x, y, c = body[idx]
+        return (x, y) if c > 0 else None
+
+    # 1. Neck (index 1)
+    neck = get_pt(1)
+    if neck is not None:
+        return neck
+
+    # 2. Both shoulders (2, 5)
+    r_sh = get_pt(2)
+    l_sh = get_pt(5)
+    if r_sh is not None and l_sh is not None:
+        return ((r_sh[0] + l_sh[0]) / 2, (r_sh[1] + l_sh[1]) / 2)
+
+    # 3. Single shoulder
+    if r_sh is not None:
+        return r_sh
+    if l_sh is not None:
+        return l_sh
+
+    return None
+
+
+def _position_keypoints_by_anchor(
+    rotated: dict[str, list[tuple[float, float, float]]],
+    original: dict[str, list[tuple[float, float, float]]],
 ) -> dict[str, list[tuple[float, float, float]]]:
     """
-    Scale keypoints to fit within canvas (if they exceed bounds), then center.
-    Prevents feet/head from being cut off when the figure is taller than the image.
-    Uses main body only (excludes face indices) for centroid/bbox so face points
-    don't pull the figure down when centered.
+    Translate rotated keypoints so the anchor (neck or shoulders) matches the original position.
+    Keeps the figure anchored in place based on its pre-rotation position.
     """
-    all_x, all_y, total_conf = 0.0, 0.0, 0.0
-    xs, ys = [], []
-    for part, pts in keypoints.items():
-        for i, (x, y, c) in enumerate(pts):
-            if c <= 0:
-                continue
-            if part == "body" and i in FACE_INDICES:
-                continue  # Exclude face from centroid/bbox - center on main body
-            all_x += x * c
-            all_y += y * c
-            total_conf += c
-            xs.append(x)
-            ys.append(y)
+    orig_anchor = _get_anchor_point(original)
+    rot_anchor = _get_anchor_point(rotated)
+    if orig_anchor is None or rot_anchor is None:
+        return rotated
 
-    if total_conf <= 0 or not xs or not ys:
-        return keypoints
-
-    min_x, max_x = min(xs), max(xs)
-    min_y, max_y = min(ys), max(ys)
-
-    # Centroid (stays fixed when scaling around it)
-    cx = all_x / total_conf
-    cy = all_y / total_conf
-
-    # Max extent from centroid in each direction (we center the centroid, so we must fit
-    # the larger of the two sides; using bbox_h/2 fails when centroid is off-center)
-    extent_x = max(cx - min_x, max_x - cx)
-    extent_y = max(cy - min_y, max_y - cy)
-
-    # Usable canvas with padding (half-extent each side of center)
-    pad_w = width * padding
-    pad_h = height * padding
-    usable_half_w = (width - 2 * pad_w) / 2.0
-    usable_half_h = (height - 2 * pad_h) / 2.0
-
-    # Scale down so extent from centroid fits within usable half-canvas
-    scale = 1.0
-    if extent_x > usable_half_w and usable_half_w > 0:
-        scale = min(scale, usable_half_w / extent_x)
-    if extent_y > usable_half_h and usable_half_h > 0:
-        scale = min(scale, usable_half_h / extent_y)
-    target_x = width / 2.0
-    target_y = height / 2.0
-    dx = target_x - cx
-    dy = target_y - cy
+    dx = orig_anchor[0] - rot_anchor[0]
+    dy = orig_anchor[1] - rot_anchor[1]
 
     result: dict[str, list[tuple[float, float, float]]] = {}
-    for part, pts in keypoints.items():
-        result[part] = [
-            (cx + (x - cx) * scale + dx, cy + (y - cy) * scale + dy, c)
-            for x, y, c in pts
-        ]
+    for part, pts in rotated.items():
+        result[part] = [(x + dx, y + dy, c) for x, y, c in pts]
     return result
 
 
@@ -633,10 +624,10 @@ def rotate_openpose(
     rotated = rotate_keypoints_3d(keypoints, pivot, degrees, direction)
     rotated = join_broken_segments(rotated, 0.0)
 
-    # Scale to fit and center figure (prevents feet/head cutoff, fixes right/left bias)
-    rotated = _fit_and_center_keypoints_on_canvas(rotated, w, h)
+    # Position by anchor: align neck/shoulders with original figure position
+    rotated = _position_keypoints_by_anchor(rotated, keypoints)
 
-    # Console: post-rotated figure (after rotation, fit, and center)
+    # Console: post-rotated figure (after rotation and anchor positioning)
     post_dict = _keypoints_to_openpose_dict(rotated)
     print(f"[OpenPose Rotator] Image {image_index} POST-ROTATED (direction={direction}, degrees={degrees}):")
     print(f"  body: {rotated.get('body', [])}")
