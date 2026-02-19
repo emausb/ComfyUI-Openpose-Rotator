@@ -402,8 +402,9 @@ def _compute_adaptive_depth_scale(
     return 0.4 * (120.0 / shoulder_width)
 
 
-# Perspective scale_y: normalizes (cy - y) so perspective in [-0.5, 0.5] gives moderate effect
-PERSPECTIVE_SCALE_Y = 0.001
+# Perspective scale_y: (cy - y) is in pixels; this scales the term so perspective has visible effect.
+# Main z ~ (x-cx)*scale is typically 10-40. For perspective term to matter: e.g. 0.3*200*k ~ 5 => k ~ 0.08
+PERSPECTIVE_SCALE_Y = 0.05
 
 
 def rotate_keypoints_3d(
