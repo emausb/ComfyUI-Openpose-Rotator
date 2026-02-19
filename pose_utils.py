@@ -454,22 +454,24 @@ def _fit_and_center_keypoints_on_canvas(
     """
     Scale keypoints to fit within canvas (if they exceed bounds), then center.
     Prevents feet/head from being cut off when the figure is taller than the image.
+    Uses main body only (excludes face indices) for centroid/bbox so face points
+    don't pull the figure down when centered.
     """
     all_x, all_y, total_conf = 0.0, 0.0, 0.0
-    for pts in keypoints.values():
-        for x, y, c in pts:
-            if c > 0:
-                all_x += x * c
-                all_y += y * c
-                total_conf += c
+    xs, ys = [], []
+    for part, pts in keypoints.items():
+        for i, (x, y, c) in enumerate(pts):
+            if c <= 0:
+                continue
+            if part == "body" and i in FACE_INDICES:
+                continue  # Exclude face from centroid/bbox - center on main body
+            all_x += x * c
+            all_y += y * c
+            total_conf += c
+            xs.append(x)
+            ys.append(y)
 
-    if total_conf <= 0:
-        return keypoints
-
-    # Bounding box of visible keypoints
-    xs = [x for pts in keypoints.values() for x, y, c in pts if c > 0]
-    ys = [y for pts in keypoints.values() for x, y, c in pts if c > 0]
-    if not xs or not ys:
+    if total_conf <= 0 or not xs or not ys:
         return keypoints
 
     min_x, max_x = min(xs), max(xs)
