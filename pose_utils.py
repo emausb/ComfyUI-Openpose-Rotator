@@ -398,6 +398,10 @@ def rotate_keypoints_3d(
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
 
+    # Vertical depth factor: lower body (feet) extends toward viewer, so higher y = higher depth
+    # Prevents hips (near torso center) from being drawn on top of feet
+    vertical_depth_scale = 0.25
+
     def rotate_point(
         x: float, y: float, scale: float
     ) -> tuple[float, float, float]:
@@ -405,7 +409,8 @@ def rotate_keypoints_3d(
         z = (x - cx) * scale
         x_new = (x - cx) * cos_t - z * sin_t + cx
         y_new = y
-        z_new = (x - cx) * sin_t + z * cos_t  # depth after rotation
+        z_new = (x - cx) * sin_t + z * cos_t  # horizontal depth after rotation
+        z_new += (y - cy) * vertical_depth_scale  # vertical: feet (high y) in front of hips
         return (x_new, y_new, z_new)
 
     result: dict[str, list[tuple[float, float, float]]] = {}
@@ -575,7 +580,7 @@ def render_openpose_image(
         color = BODY_COLORS[i % len(BODY_COLORS)]
         cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, 4)
 
-    # Draw body joints (front-facing first so they appear on top)
+    # Draw body joints back-to-front (far first, near last) so front joints appear on top
     # Exclude face/head indices (0, 15, 16, 17, 18) - focus on main body
     BODY_JOINT_INDICES = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
     joint_data = [
@@ -584,7 +589,7 @@ def render_openpose_image(
         if c > 0 and i in BODY_JOINT_INDICES
     ]
     if body_depths:
-        joint_data.sort(key=lambda t: -body_depths[t[0]] if t[0] < len(body_depths) else 0)
+        joint_data.sort(key=lambda t: body_depths[t[0]] if t[0] < len(body_depths) else 0)
     for i, x, y, c in joint_data:
         color_idx = JOINT_COLOR_INDICES.get(i, 0)
         color = BODY_COLORS[color_idx]
