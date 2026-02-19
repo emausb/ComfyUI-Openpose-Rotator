@@ -25,6 +25,7 @@ class OpenPoseRotator:
             },
             "optional": {
                 "pose_keypoint": ("POSE_KEYPOINT",),
+                "debug": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -34,6 +35,7 @@ class OpenPoseRotator:
         direction: str,
         degrees: int,
         pose_keypoint: list | None = None,
+        debug: bool = False,
     ) -> tuple[torch.Tensor, list]:
         """
         Rotate OpenPose figure(s) around torso. Processes batch of images.
@@ -56,7 +58,9 @@ class OpenPoseRotator:
                 else:
                     kp = pose_keypoint
 
-            out_img, success, rotated_kp = rotate_openpose(img, kp, direction, degrees, image_index=i)
+            out_img, success, rotated_kp = rotate_openpose(
+                img, kp, direction, degrees, image_index=i, debug=debug
+            )
 
             if not success:
                 print("OpenPose Rotator: Could not detect torso. Returning input image.")

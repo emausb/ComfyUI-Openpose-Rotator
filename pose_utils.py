@@ -514,14 +514,31 @@ def join_broken_segments(
     return keypoints
 
 
+def _draw_dashed_vertical_line(
+    canvas: np.ndarray, x: int, color: tuple[int, int, int], thickness: int = 1, dash_len: int = 8, gap_len: int = 6
+) -> None:
+    """Draw a dashed vertical line at x from top to bottom of canvas."""
+    h, w = canvas.shape[:2]
+    if x < 0 or x >= w:
+        return
+    y = 0
+    while y < h:
+        y_end = min(y + dash_len, h)
+        cv2.line(canvas, (x, y), (x, y_end), color, thickness)
+        y += dash_len + gap_len
+
+
 def render_openpose_image(
     keypoints: dict[str, list[tuple[float, float, float]]],
     width: int,
     height: int,
+    debug: bool = False,
+    axis_x: float | None = None,
 ) -> np.ndarray:
     """
     Draw OpenPose skeleton on blank canvas. Black background (matches ControlNet pose images).
     Uses static connection and draw-order definitions; no depth computation.
+    When debug=True and axis_x is provided, draws the rotation axis as a white dashed line.
     """
     canvas = np.zeros((height, width, 3), dtype=np.uint8)
 
@@ -570,6 +587,11 @@ def render_openpose_image(
         color = BODY_COLORS[color_idx]
         cv2.circle(canvas, (int(x), int(y)), joint_radius, color, -1)
 
+    # Debug: draw rotation axis (white, dashed, thin)
+    if debug and axis_x is not None:
+        axis_xi = int(round(axis_x))
+        _draw_dashed_vertical_line(canvas, axis_xi, (255, 255, 255), thickness=1)
+
     # Hands and face rendering - commented out to focus on main body composition
     # for hand_key, hand_pts in [("hand_left", keypoints.get("hand_left", [])),
     #                            ("hand_right", keypoints.get("hand_right", []))]:
@@ -588,6 +610,7 @@ def rotate_openpose(
     direction: str,
     degrees: float,
     image_index: int = 0,
+    debug: bool = False,
 ) -> tuple[np.ndarray, bool, dict[str, list[tuple[float, float, float]]] | None]:
     """
     Main pipeline: extract/parse keypoints, detect torso, rotate, render.
@@ -609,11 +632,12 @@ def rotate_openpose(
     # Scale normalized coords to image size (ComfyUI may pass 0-1 range)
     keypoints = _scale_keypoints_to_image(keypoints, w, h)
 
-    # Console: pre-rotated figure (before rotation, after scaling)
-    pre_dict = _keypoints_to_openpose_dict(keypoints)
-    print(f"[OpenPose Rotator] Image {image_index} PRE-ROTATED (direction={direction}, degrees={degrees}):")
-    print(f"  body: {keypoints.get('body', [])}")
-    print(f"  pose_keypoints_2d (flat): {pre_dict.get('people', [{}])[0].get('pose_keypoints_2d', [])}")
+    # Console: pre-rotated figure (before rotation, after scaling) - only when debug
+    if debug:
+        pre_dict = _keypoints_to_openpose_dict(keypoints)
+        print(f"[OpenPose Rotator] Image {image_index} PRE-ROTATED (direction={direction}, degrees={degrees}):")
+        print(f"  body: {keypoints.get('body', [])}")
+        print(f"  pose_keypoints_2d (flat): {pre_dict.get('people', [{}])[0].get('pose_keypoints_2d', [])}")
 
     # Torso pivot
     pivot = compute_torso_pivot(keypoints)
@@ -625,14 +649,23 @@ def rotate_openpose(
     rotated = join_broken_segments(rotated, 0.0)
 
     # Position by anchor: align neck/shoulders with original figure position
+    orig_anchor = _get_anchor_point(keypoints)
+    rot_anchor = _get_anchor_point(rotated)
     rotated = _position_keypoints_by_anchor(rotated, keypoints)
 
-    # Console: post-rotated figure (after rotation and anchor positioning)
-    post_dict = _keypoints_to_openpose_dict(rotated)
-    print(f"[OpenPose Rotator] Image {image_index} POST-ROTATED (direction={direction}, degrees={degrees}):")
-    print(f"  body: {rotated.get('body', [])}")
-    print(f"  pose_keypoints_2d (flat): {post_dict.get('people', [{}])[0].get('pose_keypoints_2d', [])}")
+    # Axis x in output: pivot x plus translation from anchor positioning
+    axis_x = None
+    if debug and orig_anchor is not None and rot_anchor is not None:
+        dx = orig_anchor[0] - rot_anchor[0]
+        axis_x = pivot[0] + dx
+
+    # Console: post-rotated figure (after rotation and anchor positioning) - only when debug
+    if debug:
+        post_dict = _keypoints_to_openpose_dict(rotated)
+        print(f"[OpenPose Rotator] Image {image_index} POST-ROTATED (direction={direction}, degrees={degrees}):")
+        print(f"  body: {rotated.get('body', [])}")
+        print(f"  pose_keypoints_2d (flat): {post_dict.get('people', [{}])[0].get('pose_keypoints_2d', [])}")
 
     # Render using static connection and draw-order definitions
-    rendered = render_openpose_image(rotated, w, h)
+    rendered = render_openpose_image(rotated, w, h, debug=debug, axis_x=axis_x)
     return rendered, True, rotated
