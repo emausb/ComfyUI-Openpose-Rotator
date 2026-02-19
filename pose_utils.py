@@ -47,23 +47,22 @@ BODY_DEPTH_SCALES: dict[int, float] = {
 # Default depth scale for hands (21 keypoints each - no per-index in OpenPose hand spec)
 HAND_DEPTH_SCALE = 0.45
 
-# Limb connections for body (COCO format, 0-indexed)
-# Main body only - matches ControlNet/DWPose expected appearance
-# Order aligned with ControlNet util.draw_bodypose colors for consistency
+# Static limb definitions: (a, b) connection, draw layer (0=torso first, 4=feet last), color index
+# Connections never change; draw order is anatomical (torso -> arms -> legs)
 BODY_LIMBS = [
-    (1, 2),   # neck - r_shoulder  (shoulder line, red)
-    (1, 5),   # neck - l_shoulder
-    (2, 3),   # r_shoulder - r_elbow (r arm, orange)
-    (3, 4),   # r_elbow - r_wrist   (r forearm, yellow)
-    (5, 6),   # l_shoulder - l_elbow (l arm, green)
-    (6, 7),   # l_elbow - l_wrist   (l forearm, lime)
-    (1, 8),   # neck - mid_hip      (spine, green)
-    (8, 9),   # mid_hip - r_hip     (r thigh, teal)
-    (9, 10),  # r_hip - r_knee
-    (10, 11), # r_knee - r_ankle    (r shin, light blue)
-    (8, 12),  # mid_hip - l_hip     (l thigh, dark blue)
-    (12, 13), # l_hip - l_knee
-    (13, 14), # l_knee - l_ankle    (l shin, purple)
+    ((1, 2), 0, 0),   # neck - r_shoulder
+    ((1, 5), 0, 0),   # neck - l_shoulder
+    ((2, 3), 1, 2),   # r_shoulder - r_elbow
+    ((3, 4), 2, 3),   # r_elbow - r_wrist
+    ((5, 6), 1, 4),   # l_shoulder - l_elbow
+    ((6, 7), 2, 5),   # l_elbow - l_wrist
+    ((1, 8), 0, 6),   # neck - mid_hip (spine)
+    ((8, 9), 3, 7),   # mid_hip - r_hip
+    ((9, 10), 3, 8),  # r_hip - r_knee
+    ((10, 11), 4, 9), # r_knee - r_ankle
+    ((8, 12), 3, 10), # mid_hip - l_hip
+    ((12, 13), 3, 11),# l_hip - l_knee
+    ((13, 14), 4, 12),# l_knee - l_ankle
 ]
 
 # ControlNet OpenPose standard colors (BGR) - matches expected figure appearance
@@ -84,10 +83,11 @@ BODY_COLORS = [
     (255, 0, 170),   # purple - l shin
 ]
 
-# Joint index -> BODY_COLORS index for main body keypoints (1-14)
-JOINT_COLOR_INDICES = {
-    1: 0, 2: 2, 3: 2, 4: 3, 5: 4, 6: 4, 7: 5,
-    8: 6, 9: 7, 10: 8, 11: 9, 12: 10, 13: 11, 14: 12,
+# Static joint definitions: index -> (draw layer, color index)
+# Draw order is anatomical (torso -> arms -> legs)
+JOINT_LAYERS = {
+    1: (0, 0), 2: (1, 2), 3: (1, 2), 4: (1, 3), 5: (1, 4), 6: (1, 4), 7: (1, 5), 8: (0, 6),
+    9: (2, 7), 10: (2, 8), 11: (3, 9), 12: (2, 10), 13: (2, 11), 14: (3, 12),
 }
 
 # Valid main-body keypoint indices for limb drawing. Explicitly excludes face (0, 15-18)
@@ -382,11 +382,10 @@ def rotate_keypoints_3d(
     degrees: float,
     direction: str,
     depth_scale: float | None = None,
-) -> tuple[dict[str, list[tuple[float, float, float]]], dict[str, list[float]]]:
+) -> dict[str, list[tuple[float, float, float]]]:
     """
     Rotate all keypoints around Y-axis through pivot. Left = positive angle (CCW), right = negative.
-    Uses limb-specific depth inference per OpenPose COCO body indices.
-    Returns (rotated_keypoints, depth_per_point) for occlusion and depth-ordered rendering.
+    Uses limb-specific depth inference per OpenPose COCO body indices for 3D-style projection.
     """
     theta_deg = degrees if direction == "left" else -degrees
     theta = math.radians(theta_deg)
@@ -398,45 +397,30 @@ def rotate_keypoints_3d(
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
 
-    # Vertical depth factor: lower body (feet) extends toward viewer, so higher y = higher depth
-    # Prevents hips (near torso center) from being drawn on top of feet
-    vertical_depth_scale = 0.25
-
     def rotate_point(
         x: float, y: float, scale: float
-    ) -> tuple[float, float, float]:
+    ) -> tuple[float, float]:
         # Side-aware: (x - cx) gives correct sign for left/right body sides
         z = (x - cx) * scale
         x_new = (x - cx) * cos_t - z * sin_t + cx
         y_new = y
-        z_new = (x - cx) * sin_t + z * cos_t  # horizontal depth after rotation
-        z_new += (y - cy) * vertical_depth_scale  # vertical: feet (high y) in front of hips
-        return (x_new, y_new, z_new)
+        return (x_new, y_new)
 
     result: dict[str, list[tuple[float, float, float]]] = {}
-    depths: dict[str, list[float]] = {}
 
     for part, points in keypoints.items():
         rotated: list[tuple[float, float, float]] = []
-        part_depths: list[float] = []
 
         for i, (x, y, c) in enumerate(points):
             if c <= 0:
                 rotated.append((x, y, c))
-                part_depths.append(0.0)
                 continue
 
             scale = BODY_DEPTH_SCALES.get(i, HAND_DEPTH_SCALE) if part == "body" else HAND_DEPTH_SCALE
-            nx, ny, z_new = rotate_point(x, y, depth_scale * scale)
-
-            # Keep all points visible; depth ordering in render draws back-to-front
-            # so segments behind others (e.g. arm behind torso) are drawn first,
-            # segments in front (arm across body) are drawn on top
+            nx, ny = rotate_point(x, y, depth_scale * scale)
             rotated.append((nx, ny, c))
-            part_depths.append(z_new)
 
         result[part] = rotated
-        depths[part] = part_depths
 
     # Face visibility: when rotated >90°, hide face/head keypoints (back of head)
     if abs(theta_deg) >= 90:
@@ -450,7 +434,7 @@ def rotate_keypoints_3d(
         if "face" in result:
             result["face"] = [(x, y, 0.0) for x, y, c in result["face"]]
 
-    return result, depths
+    return result
 
 
 def _fit_and_center_keypoints_on_canvas(
@@ -533,28 +517,22 @@ def render_openpose_image(
     keypoints: dict[str, list[tuple[float, float, float]]],
     width: int,
     height: int,
-    depths: dict[str, list[float]] | None = None,
 ) -> np.ndarray:
     """
     Draw OpenPose skeleton on blank canvas. Black background (matches ControlNet pose images).
-    When depths is provided, limbs are drawn back-to-front (far first, near last) so segments
-    in front (e.g. arm reaching across body) are drawn on top of segments behind.
+    Uses static connection and draw-order definitions; no depth computation.
     """
     canvas = np.zeros((height, width, 3), dtype=np.uint8)
 
     body = keypoints.get("body", [])
-    body_depths = depths.get("body", []) if depths else []
 
-    # Build limb list with depth for sorting (mean depth of endpoints)
-    # Only draw limbs between valid main-body indices - never connect to face (0, 15-18)
-    # Spatial sanity: skip limbs where endpoints are implausibly far (e.g. knee-to-head
-    # when source format has different keypoint order than COCO)
-    limb_data: list[tuple[int, int, int, float]] = []
-    max_limb_ratio = 0.5  # Max limb length vs image diagonal; filters knee-to-head etc.
+    # Build limb list from static definitions; filter by validity
+    max_limb_ratio = 0.5  # Max limb length vs image diagonal; filters bad connections
     diag = (width**2 + height**2) ** 0.5
     max_limb_len = diag * max_limb_ratio
 
-    for i, (a, b) in enumerate(BODY_LIMBS):
+    limb_data: list[tuple[int, int, int, int]] = []
+    for i, ((a, b), layer, color_idx) in enumerate(BODY_LIMBS):
         if a >= len(body) or b >= len(body):
             continue
         if a not in MAIN_BODY_INDICES or b not in MAIN_BODY_INDICES:
@@ -563,35 +541,28 @@ def render_openpose_image(
         x2, y2, c2 = body[b]
         if c1 <= 0 or c2 <= 0:
             continue
-        # Skip anatomically implausible limbs (e.g. index 14=face in some formats, not l_ankle)
         limb_len = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
         if limb_len > max_limb_len:
             continue
-        depth_a = body_depths[a] if a < len(body_depths) else 0.0
-        depth_b = body_depths[b] if b < len(body_depths) else 0.0
-        mean_depth = (depth_a + depth_b) / 2
-        limb_data.append((a, b, i, mean_depth))
+        limb_data.append((a, b, layer, color_idx))
 
-    # Draw body limbs back-to-front (far limbs first)
-    limb_data.sort(key=lambda t: t[3])
-    for a, b, i, _ in limb_data:
+    # Draw limbs in static anatomical order (torso -> arms -> legs)
+    limb_data.sort(key=lambda t: t[2])
+    for a, b, _, color_idx in limb_data:
         x1, y1, c1 = body[a]
         x2, y2, c2 = body[b]
-        color = BODY_COLORS[i % len(BODY_COLORS)]
+        color = BODY_COLORS[color_idx % len(BODY_COLORS)]
         cv2.line(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, 4)
 
-    # Draw body joints back-to-front (far first, near last) so front joints appear on top
-    # Exclude face/head indices (0, 15, 16, 17, 18) - focus on main body
-    BODY_JOINT_INDICES = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}
+    # Draw joints in static anatomical order
     joint_data = [
         (i, x, y, c)
         for i, (x, y, c) in enumerate(body)
-        if c > 0 and i in BODY_JOINT_INDICES
+        if c > 0 and i in JOINT_LAYERS
     ]
-    if body_depths:
-        joint_data.sort(key=lambda t: body_depths[t[0]] if t[0] < len(body_depths) else 0)
+    joint_data.sort(key=lambda t: JOINT_LAYERS.get(t[0], (0, 0))[0])
     for i, x, y, c in joint_data:
-        color_idx = JOINT_COLOR_INDICES.get(i, 0)
+        _, color_idx = JOINT_LAYERS.get(i, (0, 0))
         color = BODY_COLORS[color_idx]
         cv2.circle(canvas, (int(x), int(y)), 4, color, -1)
 
@@ -637,13 +608,13 @@ def rotate_openpose(
     if pivot is None:
         return image, False, None
 
-    # Rotate (returns keypoints and depth for occlusion/ordering)
-    rotated, depths = rotate_keypoints_3d(keypoints, pivot, degrees, direction)
+    # Rotate keypoints around torso pivot
+    rotated = rotate_keypoints_3d(keypoints, pivot, degrees, direction)
     rotated = join_broken_segments(rotated, 0.0)
 
     # Scale to fit and center figure (prevents feet/head cutoff, fixes right/left bias)
     rotated = _fit_and_center_keypoints_on_canvas(rotated, w, h)
 
-    # Render with depth-ordered drawing
-    rendered = render_openpose_image(rotated, w, h, depths)
+    # Render using static connection and draw-order definitions
+    rendered = render_openpose_image(rotated, w, h)
     return rendered, True, rotated
