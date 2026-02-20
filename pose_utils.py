@@ -405,10 +405,16 @@ def _compute_adaptive_depth_scale(
     return 0.4 * (120.0 / shoulder_width)
 
 
-# Perspective scale_y: (cy - y) is in pixels; this scales the term so perspective has visible effect.
-# At 0.3, perspective=0.5 with a point 200px above pivot contributes 30 z-units, shifting x by
-# ~5px at 10° and ~21px at 45° — clearly perceptible without being overwhelming.
+# Perspective scale_y: bridges the raw (cy - y) pixel value to z-units.
+# In advanced mode the coefficient is derived geometrically from ADVANCED_CAMERA_ELEVATION_DEG;
+# this constant keeps the formula consistent: z += perspective * (cy - y) * PERSPECTIVE_SCALE_Y.
 PERSPECTIVE_SCALE_Y = 0.3
+
+# Advanced mode: fixed physical camera / figure assumptions.
+# Camera is elevated 35° above horizontal, looking at a standing figure that fills
+# roughly 80-100% (average ~90%) of the image height.
+ADVANCED_CAMERA_ELEVATION_DEG = 35.0
+ADVANCED_FIGURE_FILL = 0.90
 
 # Ankle y-parity threshold: fraction of figure height (neck→lower ankle) within which both ankles
 # are considered to be at the same elevation (standing upright on flat ground).
@@ -453,6 +459,28 @@ def _detect_upright_figure(
         1.0,
     )
     return True, neck, ankle_mid
+
+
+def _compute_advanced_params(image_height: int) -> tuple[float, float]:
+    """
+    Derive perspective and focal_length for advanced mode from fixed camera/figure assumptions.
+
+    Camera elevation θ = ADVANCED_CAMERA_ELEVATION_DEG (35°) above horizontal.
+    Figure fills ADVANCED_FIGURE_FILL (~90%) of image height.
+
+    perspective: maps vertical pixel distance from pivot to depth.
+        Formula: z += perspective * (cy - y) * PERSPECTIVE_SCALE_Y
+        For geometric accuracy: perspective * PERSPECTIVE_SCALE_Y = tan(θ)
+        → perspective = tan(35°) / 0.3 ≈ 2.33
+
+    focal_length: perspective projection strength, scaled to image resolution.
+        From pinhole geometry: focal_length = image_height * fill / tan(θ)
+        At 35° with 90% fill → focal_length ≈ 1.29 × image_height
+    """
+    tan_elev = math.tan(math.radians(ADVANCED_CAMERA_ELEVATION_DEG))
+    perspective = tan_elev / PERSPECTIVE_SCALE_Y
+    focal_length = image_height * ADVANCED_FIGURE_FILL / tan_elev
+    return perspective, focal_length
 
 
 def rotate_keypoints_3d(
@@ -834,18 +862,26 @@ def rotate_openpose(
     image_index: int = 0,
     debug: bool = False,
     mode: str = "simple",
-    perspective: float = 0.0,
-    focal_length: float = 800.0,
 ) -> tuple[np.ndarray, bool, dict[str, list[tuple[float, float, float]]] | None]:
     """
     Main pipeline: extract/parse keypoints, detect torso, rotate, render.
     Returns (output_image, success, rotated_keypoints). On failure, returns (input_image, False, None).
     rotated_keypoints is internal format: {"body": [(x,y,c),...], "hand_left": [...], ...}
     image_index: used for console logging when processing batches.
-    mode: "simple" or "advanced". perspective: 0=eye level, >0=camera above, <0=camera below.
-    focal_length: (advanced only) perspective strength; higher=flatter.
+
+    mode: "simple" uses orthographic projection at eye level (perspective=0).
+          "advanced" uses perspective projection with camera parameters derived from
+          ADVANCED_CAMERA_ELEVATION_DEG (35°) and ADVANCED_FIGURE_FILL (90%), which
+          gives geometrically correct depth inference and focal length for the assumed pose.
     """
     h, w = image.shape[:2]
+
+    # Derive camera parameters from mode and fixed assumptions
+    if mode == "advanced":
+        perspective, focal_length = _compute_advanced_params(h)
+    else:
+        perspective = 0.0
+        focal_length = 800.0  # unused in simple (orthographic) mode
 
     # Get keypoints
     if pose_keypoint is not None:
