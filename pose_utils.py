@@ -865,6 +865,7 @@ def rotate_openpose(
     image_index: int = 0,
     debug: bool = False,
     mode: str = "simple",
+    recenter: bool = False,
 ) -> tuple[np.ndarray, bool, dict[str, list[tuple[float, float, float]]] | None]:
     """
     Main pipeline: extract/parse keypoints, detect torso, rotate, render.
@@ -876,6 +877,9 @@ def rotate_openpose(
           "advanced" uses perspective projection with camera parameters derived from
           ADVANCED_CAMERA_ELEVATION_DEG (35°) and ADVANCED_FIGURE_FILL (90%), which
           gives geometrically correct depth inference and focal length for the assumed pose.
+    recenter: when True, horizontally centers the rotated figure within the image after all
+              other positioning corrections. Centering is measured from the widest body
+              keypoints; vertical position is not changed.
     """
     h, w = image.shape[:2]
 
@@ -1014,6 +1018,21 @@ def rotate_openpose(
                     f"[OpenPose Rotator] Image {image_index}: figure shifted "
                     f"{shift_x:+.0f}px horizontally to stay in frame."
                 )
+                rotated = {
+                    part: [(px + shift_x, py, c) for px, py, c in pts]
+                    for part, pts in rotated.items()
+                }
+
+    # Optional horizontal recentering.
+    # Shifts the entire figure so the midpoint between its leftmost and rightmost visible
+    # body keypoints aligns with the horizontal centre of the image.
+    # Vertical positions are not touched. Applied after all other positioning corrections.
+    if recenter:
+        body_xs = [x for x, y, c in rotated.get("body", []) if c > 0]
+        if body_xs:
+            fig_center_x = (min(body_xs) + max(body_xs)) / 2.0
+            shift_x = (w / 2.0) - fig_center_x
+            if abs(shift_x) > 0.5:
                 rotated = {
                     part: [(px + shift_x, py, c) for px, py, c in pts]
                     for part, pts in rotated.items()

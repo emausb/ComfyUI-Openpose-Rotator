@@ -27,6 +27,7 @@ class OpenPoseRotator:
             "optional": {
                 "pose_keypoint": ("POSE_KEYPOINT",),
                 "debug": ("BOOLEAN", {"default": False}),
+                "recenter": ("BOOLEAN", {"default": True}),
             },
         }
 
@@ -38,11 +39,14 @@ class OpenPoseRotator:
         mode: str,
         pose_keypoint: list | None = None,
         debug: bool = False,
+        recenter: bool = False,
     ) -> tuple[torch.Tensor, list]:
         """
         Rotate OpenPose figure(s) around torso. Processes batch of images.
         Advanced mode uses a fixed 35° camera elevation and ~90% figure fill to
         automatically derive perspective and focal-length — no manual tuning needed.
+        recenter: when True, horizontally centers the rotated figure within the image
+                  based on its widest body keypoints; vertical position is unchanged.
         Returns (image_tensor, rotated_pose_keypoints_list).
         """
         batch_size = image.shape[0]
@@ -70,6 +74,7 @@ class OpenPoseRotator:
                 image_index=i,
                 debug=debug,
                 mode=mode,
+                recenter=recenter,
             )
 
             if not success:
