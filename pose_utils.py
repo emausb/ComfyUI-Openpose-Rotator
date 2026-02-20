@@ -898,6 +898,49 @@ def rotate_openpose(
     # Scale normalized coords to image size (ComfyUI may pass 0-1 range)
     keypoints = _scale_keypoints_to_image(keypoints, w, h)
 
+    # --- Stance detection (always logged) ---
+    # Compares the y-positions of both ankles relative to figure height.
+    # Within UPRIGHT_ANKLE_THRESHOLD → both feet on ground (spin axis = spine).
+    # Outside threshold        → one foot on ground (spin axis = that ankle).
+    _body_kp = keypoints.get("body", [])
+
+    def _stance_pt(idx: int) -> tuple[float, float, float] | None:
+        if idx >= len(_body_kp):
+            return None
+        x, y, c = _body_kp[idx]
+        return (x, y, c) if c > 0 else None
+
+    _neck_s = _stance_pt(1)
+    _r_ank_s = _stance_pt(10)  # COCO-18: r_ankle=10
+    _l_ank_s = _stance_pt(13)  # COCO-18: l_ankle=13
+
+    stance: str = "unknown"
+    ground_ankle_pt: tuple[float, float, float] | None = None
+    ground_ankle_idx: int | None = None
+
+    if _neck_s is not None and _r_ank_s is not None and _l_ank_s is not None:
+        _lower_y = max(_r_ank_s[1], _l_ank_s[1])
+        _fig_h = abs(_lower_y - _neck_s[1])
+        if _fig_h >= 1:
+            _ank_diff = abs(_r_ank_s[1] - _l_ank_s[1])
+            if _ank_diff <= UPRIGHT_ANKLE_THRESHOLD * _fig_h:
+                stance = "both_feet"
+                print(f"[OpenPose Rotator] Image {image_index}: both feet on ground.")
+            else:
+                stance = "one_foot"
+                # Ground foot = the lower ankle (larger y, since y increases downward)
+                if _r_ank_s[1] >= _l_ank_s[1]:
+                    ground_ankle_pt = _r_ank_s
+                    ground_ankle_idx = 10
+                else:
+                    ground_ankle_pt = _l_ank_s
+                    ground_ankle_idx = 13
+                print(
+                    f"[OpenPose Rotator] Image {image_index}: one foot on ground "
+                    f"(ankle idx {ground_ankle_idx} at "
+                    f"{ground_ankle_pt[0]:.0f}, {ground_ankle_pt[1]:.0f})."
+                )
+
     # Console: pre-rotated figure (before rotation, after scaling) - only when debug
     if debug:
         pre_dict = _keypoints_to_openpose_dict(keypoints)
@@ -905,12 +948,18 @@ def rotate_openpose(
         print(f"  body: {keypoints.get('body', [])}")
         print(f"  pose_keypoints_2d (flat): {pre_dict.get('people', [{}])[0].get('pose_keypoints_2d', [])}")
 
-    # Torso pivot
-    pivot = compute_torso_pivot(keypoints)
-    if pivot is None:
+    # Torso pivot — for one-foot stance, shift the rotation axis to the ground ankle's x
+    torso_pivot = compute_torso_pivot(keypoints)
+    if torso_pivot is None:
         return image, False, None
 
-    # Rotate keypoints around torso pivot
+    if stance == "one_foot" and ground_ankle_pt is not None:
+        # cx = ground ankle; cy stays at torso level for depth-inference in z-calculation
+        pivot = (ground_ankle_pt[0], torso_pivot[1])
+    else:
+        pivot = torso_pivot
+
+    # Rotate keypoints around the chosen pivot
     rotated = rotate_keypoints_3d(
         keypoints,
         pivot,
@@ -922,41 +971,95 @@ def rotate_openpose(
     )
     rotated = join_broken_segments(rotated, 0.0)
 
-    # Position by anchor: align neck/shoulders with original figure position
+    # Position by anchor
+    # • both_feet / unknown  → align neck/shoulders (original behaviour)
+    # • one_foot             → lock the ground ankle so it stays pinned to its original position
     orig_anchor = _get_anchor_point(keypoints)
     rot_anchor = _get_anchor_point(rotated)
-    rotated = _position_keypoints_by_anchor(rotated, keypoints)
 
-    # Build debug axis line from output body positions (after rotation + anchor positioning)
+    if stance == "one_foot" and ground_ankle_pt is not None and ground_ankle_idx is not None:
+        body_rot = rotated.get("body", [])
+        if ground_ankle_idx < len(body_rot) and body_rot[ground_ankle_idx][2] > 0:
+            rot_ax, rot_ay, _ = body_rot[ground_ankle_idx]
+            dx = ground_ankle_pt[0] - rot_ax
+            dy = ground_ankle_pt[1] - rot_ay
+            rotated = {
+                part: [(px + dx, py + dy, c) for px, py, c in pts]
+                for part, pts in rotated.items()
+            }
+        else:
+            rotated = _position_keypoints_by_anchor(rotated, keypoints)
+    else:
+        rotated = _position_keypoints_by_anchor(rotated, keypoints)
+
+    # Horizontal in-frame correction for one-foot stance.
+    # After pinning the ankle, the swept side of the figure can overflow the image edge.
+    # When that happens, shift the *entire* figure (ankle included) just far enough to
+    # bring the overflowing side back to the image boundary.
+    # Only body keypoints are used to measure overflow — hand / face extremities are ignored.
+    if stance == "one_foot":
+        body_xs = [x for x, y, c in rotated.get("body", []) if c > 0]
+        if body_xs:
+            min_bx, max_bx = min(body_xs), max(body_xs)
+            if min_bx < 0 and max_bx > w:
+                shift_x = 0.0  # figure wider than frame — no good single shift
+            elif min_bx < 0:
+                shift_x = -min_bx
+            elif max_bx > w:
+                shift_x = w - max_bx
+            else:
+                shift_x = 0.0
+            if abs(shift_x) > 0.5:
+                print(
+                    f"[OpenPose Rotator] Image {image_index}: figure shifted "
+                    f"{shift_x:+.0f}px horizontally to stay in frame."
+                )
+                rotated = {
+                    part: [(px + shift_x, py, c) for px, py, c in pts]
+                    for part, pts in rotated.items()
+                }
+
+    # Build debug axis line (after rotation + anchor positioning)
     axis_line = None
     if debug:
         body_out = rotated.get("body", [])
-        upright_drawn = False
-        # Try spine axis: neck → ankle midpoint in output space
-        if len(body_out) > 14:
+
+        if stance == "both_feet":
+            # Spine axis: neck → midpoint of both ankles
             neck_out = body_out[1] if len(body_out) > 1 else None
-            r_ankle_out = body_out[10] if len(body_out) > 10 else None  # COCO-18: r_ankle=10
-            l_ankle_out = body_out[13] if len(body_out) > 13 else None  # COCO-18: l_ankle=13
+            r_ankle_out = body_out[10] if len(body_out) > 10 else None
+            l_ankle_out = body_out[13] if len(body_out) > 13 else None
             if (neck_out is not None and neck_out[2] > 0
                     and r_ankle_out is not None and r_ankle_out[2] > 0
                     and l_ankle_out is not None and l_ankle_out[2] > 0):
-                is_upright_now, _, _ = _detect_upright_figure(keypoints)
-                if is_upright_now:
-                    ankle_mid_x = (r_ankle_out[0] + l_ankle_out[0]) / 2
-                    ankle_mid_y = (r_ankle_out[1] + l_ankle_out[1]) / 2
-                    axis_line = (
-                        (int(round(neck_out[0])), int(round(neck_out[1]))),
-                        (int(round(ankle_mid_x)), int(round(ankle_mid_y))),
-                    )
-                    upright_drawn = True
-                    if debug:
-                        print(f"[OpenPose Rotator] Upright detected: spine axis from "
-                              f"neck ({neck_out[0]:.0f},{neck_out[1]:.0f}) to "
-                              f"ankle mid ({ankle_mid_x:.0f},{ankle_mid_y:.0f})")
-        if not upright_drawn and orig_anchor is not None and rot_anchor is not None:
-            # Fall back to vertical line at pivot x after anchor translation
-            dx = orig_anchor[0] - rot_anchor[0]
-            axis_xi = int(round(pivot[0] + dx))
+                ankle_mid_x = (r_ankle_out[0] + l_ankle_out[0]) / 2
+                ankle_mid_y = (r_ankle_out[1] + l_ankle_out[1]) / 2
+                axis_line = (
+                    (int(round(neck_out[0])), int(round(neck_out[1]))),
+                    (int(round(ankle_mid_x)), int(round(ankle_mid_y))),
+                )
+                print(
+                    f"[OpenPose Rotator] Image {image_index}: both feet — spine axis "
+                    f"from neck ({neck_out[0]:.0f},{neck_out[1]:.0f}) "
+                    f"to ankle mid ({ankle_mid_x:.0f},{ankle_mid_y:.0f})."
+                )
+
+        elif stance == "one_foot" and ground_ankle_idx is not None:
+            # Vertical axis overlapping the ground ankle node
+            ank_out = body_out[ground_ankle_idx] if ground_ankle_idx < len(body_out) else None
+            if ank_out is not None and ank_out[2] > 0:
+                ax = int(round(ank_out[0]))
+                ay = int(round(ank_out[1]))
+                axis_line = ((ax, 0), (ax, h))
+                print(
+                    f"[OpenPose Rotator] Image {image_index}: one foot — vertical axis "
+                    f"at ankle ({ax}, {ay})."
+                )
+
+        if axis_line is None and orig_anchor is not None and rot_anchor is not None:
+            # Fallback (stance unknown or required keypoints missing)
+            dx_fb = orig_anchor[0] - rot_anchor[0]
+            axis_xi = int(round(pivot[0] + dx_fb))
             axis_line = ((axis_xi, 0), (axis_xi, h))
 
     # Console: post-rotated figure (after rotation and anchor positioning) - only when debug
