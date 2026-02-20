@@ -1012,6 +1012,12 @@ def rotate_openpose(
     # Console: pre-rotated figure (before rotation, after scaling) - only when debug
     if debug:
         pre_dict = _keypoints_to_openpose_dict(keypoints)
+        face_pts = keypoints.get("face", [])
+        face_visible = sum(1 for _, _, c in face_pts if c > 0)
+        if face_visible > 0:
+            print(f"[OpenPose Rotator] Image {image_index}: face mesh present ({face_visible}/{len(face_pts)} visible keypoints).")
+        else:
+            print(f"[OpenPose Rotator] Image {image_index}: no face mesh in input.")
         print(f"[OpenPose Rotator] Image {image_index} PRE-ROTATED (direction={direction}, degrees={degrees}):")
         print(f"  body: {keypoints.get('body', [])}")
         print(f"  pose_keypoints_2d (flat): {pre_dict.get('people', [{}])[0].get('pose_keypoints_2d', [])}")
