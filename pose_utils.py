@@ -490,9 +490,9 @@ def rotate_keypoints_3d(
     axis_point: np.ndarray | None = None
     axis_dir: np.ndarray | None = None
 
-    if mode == "advanced":
-        is_upright, neck_pt, ankle_mid_pt = _detect_upright_figure(keypoints)
-        if is_upright and neck_pt is not None and ankle_mid_pt is not None:
+    # Upright spine axis applies in both modes — neck is always the rotation anchor when conditions met
+    is_upright, neck_pt, ankle_mid_pt = _detect_upright_figure(keypoints)
+    if is_upright and neck_pt is not None and ankle_mid_pt is not None:
             def _infer_z(px: float, py: float, limb_scale: float) -> float:
                 return (px - cx) * depth_scale * limb_scale + perspective * (cy - py) * PERSPECTIVE_SCALE_Y
 
@@ -664,18 +664,54 @@ def join_broken_segments(
     return keypoints
 
 
-def _draw_dashed_vertical_line(
-    canvas: np.ndarray, x: int, color: tuple[int, int, int], thickness: int = 1, dash_len: int = 8, gap_len: int = 6
+def _draw_dashed_line(
+    canvas: np.ndarray,
+    p0: tuple[int, int],
+    p1: tuple[int, int],
+    color: tuple[int, int, int],
+    thickness: int = 1,
+    dash_len: int = 8,
+    gap_len: int = 6,
 ) -> None:
-    """Draw a dashed vertical line at x from top to bottom of canvas."""
+    """Draw a dashed line through p0 and p1, extended to canvas edges in both directions."""
     h, w = canvas.shape[:2]
-    if x < 0 or x >= w:
+    x0, y0 = float(p0[0]), float(p0[1])
+    x1, y1 = float(p1[0]), float(p1[1])
+    dx, dy = x1 - x0, y1 - y0
+    length = math.hypot(dx, dy)
+    if length < 1:
         return
-    y = 0
-    while y < h:
-        y_end = min(y + dash_len, h)
-        cv2.line(canvas, (x, y), (x, y_end), color, thickness)
-        y += dash_len + gap_len
+    ux, uy = dx / length, dy / length
+
+    def t_to_edge(ox: float, oy: float, vx: float, vy: float) -> float:
+        t = float("inf")
+        if vx > 1e-9:
+            t = min(t, (w - 1 - ox) / vx)
+        elif vx < -1e-9:
+            t = min(t, -ox / vx)
+        if vy > 1e-9:
+            t = min(t, (h - 1 - oy) / vy)
+        elif vy < -1e-9:
+            t = min(t, -oy / vy)
+        return max(t, 0.0)
+
+    t_fwd = t_to_edge(x0, y0, ux, uy)
+    t_bwd = t_to_edge(x0, y0, -ux, -uy)
+    sx = x0 - t_bwd * ux
+    sy = y0 - t_bwd * uy
+    total = t_fwd + t_bwd
+
+    t = 0.0
+    drawing = True
+    while t < total:
+        seg = dash_len if drawing else gap_len
+        t_end = min(t + seg, total)
+        if drawing:
+            fx, fy = sx + t * ux, sy + t * uy
+            tx, ty = sx + t_end * ux, sy + t_end * uy
+            cv2.line(canvas, (int(fx), int(fy)), (int(tx), int(ty)), color, thickness)
+        t = t_end
+        drawing = not drawing
 
 
 def render_openpose_image(
@@ -683,12 +719,13 @@ def render_openpose_image(
     width: int,
     height: int,
     debug: bool = False,
-    axis_x: float | None = None,
+    axis_line: tuple[tuple[int, int], tuple[int, int]] | None = None,
 ) -> np.ndarray:
     """
     Draw OpenPose skeleton on blank canvas. Black background (matches ControlNet pose images).
     Uses static connection and draw-order definitions; no depth computation.
-    When debug=True and axis_x is provided, draws the rotation axis as a white dashed line.
+    When debug=True and axis_line is provided, draws the rotation axis as a white dashed line
+    through the two given 2D points (extended to canvas edges).
     """
     canvas = np.zeros((height, width, 3), dtype=np.uint8)
 
@@ -738,9 +775,8 @@ def render_openpose_image(
         cv2.circle(canvas, (int(x), int(y)), joint_radius, color, -1)
 
     # Debug: draw rotation axis (white, dashed, thin)
-    if debug and axis_x is not None:
-        axis_xi = int(round(axis_x))
-        _draw_dashed_vertical_line(canvas, axis_xi, (255, 255, 255), thickness=1)
+    if debug and axis_line is not None:
+        _draw_dashed_line(canvas, axis_line[0], axis_line[1], (255, 255, 255), thickness=1)
 
     # Face mesh (OpenPose 70-point) - draw before hands so body/face compose first
     face_pts = keypoints.get("face", [])
@@ -849,11 +885,37 @@ def rotate_openpose(
     rot_anchor = _get_anchor_point(rotated)
     rotated = _position_keypoints_by_anchor(rotated, keypoints)
 
-    # Axis x in output: pivot x plus translation from anchor positioning
-    axis_x = None
-    if debug and orig_anchor is not None and rot_anchor is not None:
-        dx = orig_anchor[0] - rot_anchor[0]
-        axis_x = pivot[0] + dx
+    # Build debug axis line from output body positions (after rotation + anchor positioning)
+    axis_line = None
+    if debug:
+        body_out = rotated.get("body", [])
+        upright_drawn = False
+        # Try spine axis: neck → ankle midpoint in output space
+        if len(body_out) > 14:
+            neck_out = body_out[1] if len(body_out) > 1 else None
+            r_ankle_out = body_out[11] if len(body_out) > 11 else None
+            l_ankle_out = body_out[14] if len(body_out) > 14 else None
+            if (neck_out is not None and neck_out[2] > 0
+                    and r_ankle_out is not None and r_ankle_out[2] > 0
+                    and l_ankle_out is not None and l_ankle_out[2] > 0):
+                is_upright_now, _, _ = _detect_upright_figure(keypoints)
+                if is_upright_now:
+                    ankle_mid_x = (r_ankle_out[0] + l_ankle_out[0]) / 2
+                    ankle_mid_y = (r_ankle_out[1] + l_ankle_out[1]) / 2
+                    axis_line = (
+                        (int(round(neck_out[0])), int(round(neck_out[1]))),
+                        (int(round(ankle_mid_x)), int(round(ankle_mid_y))),
+                    )
+                    upright_drawn = True
+                    if debug:
+                        print(f"[OpenPose Rotator] Upright detected: spine axis from "
+                              f"neck ({neck_out[0]:.0f},{neck_out[1]:.0f}) to "
+                              f"ankle mid ({ankle_mid_x:.0f},{ankle_mid_y:.0f})")
+        if not upright_drawn and orig_anchor is not None and rot_anchor is not None:
+            # Fall back to vertical line at pivot x after anchor translation
+            dx = orig_anchor[0] - rot_anchor[0]
+            axis_xi = int(round(pivot[0] + dx))
+            axis_line = ((axis_xi, 0), (axis_xi, h))
 
     # Console: post-rotated figure (after rotation and anchor positioning) - only when debug
     if debug:
@@ -863,5 +925,5 @@ def rotate_openpose(
         print(f"  pose_keypoints_2d (flat): {post_dict.get('people', [{}])[0].get('pose_keypoints_2d', [])}")
 
     # Render using static connection and draw-order definitions
-    rendered = render_openpose_image(rotated, w, h, debug=debug, axis_x=axis_x)
+    rendered = render_openpose_image(rotated, w, h, debug=debug, axis_line=axis_line)
     return rendered, True, rotated
