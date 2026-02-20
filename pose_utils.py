@@ -10,40 +10,40 @@ from typing import Any
 import cv2
 import numpy as np
 
-# Body keypoint indices (0-based, OpenPose COCO format)
+# Body keypoint indices (0-based, ControlNet / DWPose COCO-18 format)
 # 0=nose, 1=neck, 2=r_shoulder, 3=r_elbow, 4=r_wrist, 5=l_shoulder, 6=l_elbow, 7=l_wrist,
-# 8=mid_hip, 9=r_hip, 10=r_knee, 11=r_ankle, 12=l_hip, 13=l_knee, 14=l_ankle,
-# 15=r_eye, 16=l_eye, 17=r_ear, 18=l_ear
-TORSO_INDICES = [1, 2, 5, 8, 9, 12]  # neck, shoulders, mid_hip, hips
+# 8=r_hip, 9=r_knee, 10=r_ankle, 11=l_hip, 12=l_knee, 13=l_ankle,
+# 14=r_eye, 15=l_eye, 16=r_ear, 17=l_ear
+# Note: no mid_hip in COCO-18. Legs connect directly from neck to each hip.
+TORSO_INDICES = [1, 2, 5, 8, 11]  # neck, r_shoulder, l_shoulder, r_hip, l_hip
 
 # Face/head keypoints (hidden when rotated >150° - back of head visible)
 # Keeps face visible when facing to the side (~90°) so at least one eye remains
-FACE_INDICES = {0, 15, 16, 17, 18}
+FACE_INDICES = {0, 14, 15, 16, 17}  # nose, r_eye, l_eye, r_ear, l_ear (COCO-18)
 FACE_HIDE_ANGLE = 150  # degrees - hide face only when head is turned away
 
-# Limb-specific depth scales (OpenPose COCO body indices 0-18)
+# Limb-specific depth scales (ControlNet COCO-18 body indices 0-17)
 # Torso compact; arms/legs extend further; head moderate
 # Based on typical human proportions in frontal view
 BODY_DEPTH_SCALES: dict[int, float] = {
-    0: 0.30,   # nose - head
-    1: 0.20,   # neck - torso center
+    0: 0.30,   # nose
+    1: 0.20,   # neck
     2: 0.35,   # r_shoulder
-    3: 0.50,   # r_elbow - arm extends
+    3: 0.50,   # r_elbow
     4: 0.55,   # r_wrist
     5: 0.35,   # l_shoulder
     6: 0.50,   # l_elbow
     7: 0.55,   # l_wrist
-    8: 0.22,   # mid_hip - torso
-    9: 0.30,   # r_hip
-    10: 0.45,  # r_knee - leg extends
-    11: 0.50,  # r_ankle
-    12: 0.30,  # l_hip
-    13: 0.45,  # l_knee
-    14: 0.50,  # l_ankle
-    15: 0.28,  # r_eye
-    16: 0.28,  # l_eye
-    17: 0.30,  # r_ear
-    18: 0.30,  # l_ear
+    8: 0.30,   # r_hip (COCO-18)
+    9: 0.45,   # r_knee
+    10: 0.50,  # r_ankle
+    11: 0.30,  # l_hip (COCO-18)
+    12: 0.45,  # l_knee
+    13: 0.50,  # l_ankle
+    14: 0.28,  # r_eye (COCO-18)
+    15: 0.28,  # l_eye
+    16: 0.30,  # r_ear
+    17: 0.30,  # l_ear
 }
 
 # Default depth scale for hands (21 keypoints each - no per-index in OpenPose hand spec)
@@ -53,26 +53,25 @@ HAND_DEPTH_SCALE = 0.45
 FACE_DEPTH_SCALE = 0.30
 
 # Static limb definitions: (a, b) connection, draw layer (0=head first, 4=feet last), color index
-# Connections never change; draw order is anatomical (head -> torso -> arms -> legs)
+# Uses ControlNet COCO-18 indices. No mid_hip — legs connect neck→hip directly.
 BODY_LIMBS = [
-    ((0, 1), 0, 0),   # nose - neck (head)
-    ((0, 15), 0, 0),  # nose - r_eye
-    ((0, 16), 0, 0),  # nose - l_eye
-    ((15, 17), 0, 0), # r_eye - r_ear
-    ((16, 18), 0, 0),# l_eye - l_ear
+    ((0, 1), 0, 0),   # nose - neck
+    ((0, 14), 0, 0),  # nose - r_eye  (COCO-18: 14=r_eye)
+    ((0, 15), 0, 0),  # nose - l_eye  (COCO-18: 15=l_eye)
+    ((14, 16), 0, 0), # r_eye - r_ear (COCO-18: 16=r_ear)
+    ((15, 17), 0, 0), # l_eye - l_ear (COCO-18: 17=l_ear)
     ((1, 2), 0, 0),   # neck - r_shoulder
     ((1, 5), 0, 0),   # neck - l_shoulder
     ((2, 3), 1, 2),   # r_shoulder - r_elbow
     ((3, 4), 2, 3),   # r_elbow - r_wrist
     ((5, 6), 1, 4),   # l_shoulder - l_elbow
     ((6, 7), 2, 5),   # l_elbow - l_wrist
-    ((1, 8), 0, 6),   # neck - mid_hip (spine)
-    ((8, 9), 3, 7),   # mid_hip - r_hip
-    ((9, 10), 3, 8),  # r_hip - r_knee
-    ((10, 11), 4, 9), # r_knee - r_ankle
-    ((8, 12), 3, 10), # mid_hip - l_hip
-    ((12, 13), 3, 11),# l_hip - l_knee
-    ((13, 14), 4, 12),# l_knee - l_ankle
+    ((1, 8), 0, 6),   # neck - r_hip  (spine right, COCO-18: 8=r_hip)
+    ((1, 11), 0, 6),  # neck - l_hip  (spine left,  COCO-18: 11=l_hip)
+    ((8, 9), 3, 7),   # r_hip - r_knee
+    ((9, 10), 4, 8),  # r_knee - r_ankle
+    ((11, 12), 3, 9), # l_hip - l_knee
+    ((12, 13), 4, 10),# l_knee - l_ankle
 ]
 
 # ControlNet OpenPose standard colors (BGR) - matches expected figure appearance
@@ -93,17 +92,30 @@ BODY_COLORS = [
     (255, 0, 170),   # purple - l shin
 ]
 
-# Static joint definitions: index -> (draw layer, color index)
-# Draw order is anatomical (head -> torso -> arms -> legs)
+# Static joint definitions: index -> (draw layer, color index) — ControlNet COCO-18
 JOINT_LAYERS = {
     0: (0, 0),   # nose
-    1: (0, 0), 2: (1, 2), 3: (1, 2), 4: (1, 3), 5: (1, 4), 6: (1, 4), 7: (1, 5), 8: (0, 6),
-    9: (2, 7), 10: (2, 8), 11: (3, 9), 12: (2, 10), 13: (2, 11), 14: (3, 12),
-    15: (0, 0), 16: (0, 0), 17: (0, 0), 18: (0, 0),  # r_eye, l_eye, r_ear, l_ear
+    1: (0, 0),   # neck
+    2: (1, 2),   # r_shoulder
+    3: (1, 2),   # r_elbow
+    4: (1, 3),   # r_wrist
+    5: (1, 4),   # l_shoulder
+    6: (1, 4),   # l_elbow
+    7: (1, 5),   # l_wrist
+    8: (2, 7),   # r_hip  (COCO-18)
+    9: (2, 8),   # r_knee
+    10: (3, 8),  # r_ankle
+    11: (2, 9),  # l_hip  (COCO-18)
+    12: (2, 10), # l_knee
+    13: (3, 10), # l_ankle
+    14: (0, 0),  # r_eye  (COCO-18)
+    15: (0, 0),  # l_eye
+    16: (0, 0),  # r_ear
+    17: (0, 0),  # l_ear
 }
 
-# Valid keypoint indices for limb drawing (body 0-18, COCO format)
-MAIN_BODY_INDICES = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}
+# Valid keypoint indices for limb drawing (COCO-18: indices 0-17)
+MAIN_BODY_INDICES = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}
 
 # Hand edges (0-indexed, 21 keypoints per hand) - used when hands enabled
 HAND_EDGES = [
@@ -353,8 +365,8 @@ def compute_torso_pivot(keypoints: dict[str, list[tuple[float, float, float]]]) 
             ys += y * c
             total_conf += c
 
-    # Fallback for "no torso segment" / stick-figure variants: derive missing points
-    # Neck (1) from shoulders (2, 5); mid_hip (8) from hips (9, 12)
+    # Fallback: derive neck from shoulders if missing
+    # COCO-18 has no mid_hip; both hips (8=r_hip, 11=l_hip) are already in TORSO_INDICES
     if get_pt(1) is None:
         r_sh = get_pt(2)
         l_sh = get_pt(5)
@@ -363,15 +375,6 @@ def compute_torso_pivot(keypoints: dict[str, list[tuple[float, float, float]]]) 
             ny = (r_sh[1] + l_sh[1]) / 2
             xs += nx
             ys += ny
-            total_conf += 1.0
-    if get_pt(8) is None:
-        r_hip = get_pt(9)
-        l_hip = get_pt(12)
-        if r_hip is not None and l_hip is not None:
-            mx = (r_hip[0] + l_hip[0]) / 2
-            my = (r_hip[1] + l_hip[1]) / 2
-            xs += mx
-            ys += my
             total_conf += 1.0
 
     if total_conf <= 0:
@@ -429,8 +432,8 @@ def _detect_upright_figure(
         return (x, y, c) if c > 0 else None
 
     neck = get_pt(1)
-    r_ankle = get_pt(11)
-    l_ankle = get_pt(14)
+    r_ankle = get_pt(10)  # COCO-18: r_ankle=10
+    l_ankle = get_pt(13)  # COCO-18: l_ankle=13
 
     if neck is None or r_ankle is None or l_ankle is None:
         return False, None, None
@@ -500,12 +503,12 @@ def rotate_keypoints_3d(
             nz = _infer_z(neck_pt[0], neck_pt[1], BODY_DEPTH_SCALES.get(1, 0.20))
             neck_3d = np.array([neck_pt[0] - cx, neck_pt[1] - cy, nz])
 
-            # Ankle midpoint 3D (pivot-relative) — average depth of both ankles
-            r_scale = BODY_DEPTH_SCALES.get(11, 0.50)
-            l_scale = BODY_DEPTH_SCALES.get(14, 0.50)
+            # Ankle midpoint 3D (pivot-relative) — average depth of both ankles (COCO-18: 10/13)
+            r_scale = BODY_DEPTH_SCALES.get(10, 0.50)
+            l_scale = BODY_DEPTH_SCALES.get(13, 0.50)
             body = keypoints.get("body", [])
-            r_ankle = body[11]
-            l_ankle = body[14]
+            r_ankle = body[10]
+            l_ankle = body[13]
             z_r = _infer_z(r_ankle[0], r_ankle[1], r_scale)
             z_l = _infer_z(l_ankle[0], l_ankle[1], l_scale)
             ankle_3d = np.array([
@@ -893,8 +896,8 @@ def rotate_openpose(
         # Try spine axis: neck → ankle midpoint in output space
         if len(body_out) > 14:
             neck_out = body_out[1] if len(body_out) > 1 else None
-            r_ankle_out = body_out[11] if len(body_out) > 11 else None
-            l_ankle_out = body_out[14] if len(body_out) > 14 else None
+            r_ankle_out = body_out[10] if len(body_out) > 10 else None  # COCO-18: r_ankle=10
+            l_ankle_out = body_out[13] if len(body_out) > 13 else None  # COCO-18: l_ankle=13
             if (neck_out is not None and neck_out[2] > 0
                     and r_ankle_out is not None and r_ankle_out[2] > 0
                     and l_ankle_out is not None and l_ankle_out[2] > 0):
