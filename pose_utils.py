@@ -614,17 +614,81 @@ def rotate_keypoints_3d(
 
         result[part] = rotated
 
-    # Face visibility: when rotated past threshold, hide face/head keypoints (back of head)
-    if abs(theta_deg) >= FACE_HIDE_ANGLE:
-        if "body" in result:
-            body = result["body"]
-            for idx in FACE_INDICES:
-                if idx < len(body):
-                    x, y, c = body[idx]
-                    body[idx] = (x, y, 0.0)
-        # Also hide separate face keypoints (OpenPose face mesh)
-        if "face" in result:
-            result["face"] = [(x, y, 0.0) for x, y, c in result["face"]]
+    # Face visibility — two regimes:
+    #
+    # Forward-facing (both eyes detected in original pose):
+    #   Hemisphere model — a face keypoint whose original normalised lateral position is
+    #   t = (x − face_cx) / half_w is hidden once  sign_dir × t > cos(|θ|).
+    #   This is geometrically exact for a hemispherical head: edge features (ears) disappear
+    #   first; the nose disappears last (only past 90°).
+    #   sign_dir = +1 for CCW (right-of-image side recedes), −1 for CW (left side recedes).
+    #
+    # Non-forward-facing (one or both eyes absent):
+    #   Original binary threshold — hide all face points once |θ| ≥ FACE_HIDE_ANGLE.
+
+    if abs(theta_deg) > 0:
+        orig_body = keypoints.get("body", [])
+        orig_face  = keypoints.get("face", [])
+
+        r_eye_orig = orig_body[14] if len(orig_body) > 14 else None
+        l_eye_orig = orig_body[15] if len(orig_body) > 15 else None
+        both_eyes  = (
+            r_eye_orig is not None and r_eye_orig[2] > 0
+            and l_eye_orig is not None and l_eye_orig[2] > 0
+        )
+
+        if both_eyes:
+            # Face centre and half-width from original pose.
+            # Prefer the face mesh (covers full jaw); fall back to eye spacing.
+            face_xs = [x for x, y, c in orig_face if c > 0] if orig_face else []
+            if len(face_xs) >= 2:
+                face_cx_orig = (min(face_xs) + max(face_xs)) / 2.0
+                half_w = (max(face_xs) - min(face_xs)) / 2.0
+            else:
+                # Eyes span roughly the middle third of the face, so half_w ≈ 1.5 × eye_sep
+                face_cx_orig = (r_eye_orig[0] + l_eye_orig[0]) / 2.0
+                half_w = abs(l_eye_orig[0] - r_eye_orig[0]) * 1.5
+            half_w = max(half_w, 1.0)
+
+            cos_theta = math.cos(math.radians(abs(theta_deg)))
+            sign_dir  = 1.0 if theta_deg > 0 else -1.0  # +1 CCW, −1 CW
+
+            # Hide face mesh keypoints (70-point OpenPose face)
+            if "face" in result and orig_face:
+                face_out = result["face"]
+                for i, (x_orig, y_orig, c_orig) in enumerate(orig_face):
+                    if c_orig <= 0 or i >= len(face_out):
+                        continue
+                    t = (x_orig - face_cx_orig) / half_w
+                    if sign_dir * t > cos_theta:
+                        px, py, _ = face_out[i]
+                        face_out[i] = (px, py, 0.0)
+
+            # Hide body face keypoints: nose(0), r_eye(14), l_eye(15), r_ear(16), l_ear(17)
+            if "body" in result:
+                body_out = result["body"]
+                for idx in FACE_INDICES:
+                    if idx >= len(orig_body) or idx >= len(body_out):
+                        continue
+                    ox, oy, oc = orig_body[idx]
+                    if oc <= 0:
+                        continue
+                    t = (ox - face_cx_orig) / half_w
+                    if sign_dir * t > cos_theta:
+                        px, py, _ = body_out[idx]
+                        body_out[idx] = (px, py, 0.0)
+
+        else:
+            # Non-forward-facing: original binary threshold
+            if abs(theta_deg) >= FACE_HIDE_ANGLE:
+                if "body" in result:
+                    body = result["body"]
+                    for idx in FACE_INDICES:
+                        if idx < len(body):
+                            x, y, c = body[idx]
+                            body[idx] = (x, y, 0.0)
+                if "face" in result:
+                    result["face"] = [(x, y, 0.0) for x, y, c in result["face"]]
 
     return result
 
