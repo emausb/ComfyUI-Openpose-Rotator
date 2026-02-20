@@ -403,8 +403,9 @@ def _compute_adaptive_depth_scale(
 
 
 # Perspective scale_y: (cy - y) is in pixels; this scales the term so perspective has visible effect.
-# Main z ~ (x-cx)*scale is typically 10-40. For perspective term to matter: e.g. 0.3*200*k ~ 5 => k ~ 0.08
-PERSPECTIVE_SCALE_Y = 0.05
+# At 0.3, perspective=0.5 with a point 200px above pivot contributes 30 z-units, shifting x by
+# ~5px at 10° and ~21px at 45° — clearly perceptible without being overwhelming.
+PERSPECTIVE_SCALE_Y = 0.3
 
 # Ankle y-parity threshold: fraction of figure height (neck→lower ankle) within which both ankles
 # are considered to be at the same elevation (standing upright on flat ground).
