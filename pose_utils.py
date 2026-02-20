@@ -573,20 +573,23 @@ def rotate_keypoints_3d(
             if use_perspective_projection:
                 z_cam = focal_length + z_rot
                 z_cam = max(z_cam, 0.1 * focal_length)
+                # Perspective division applies only to X (horizontal foreshortening during yaw).
+                # Y is kept orthographic: dividing by z_cam would vertically stretch the figure
+                # because the elevated camera assigns large z values to high/low keypoints,
+                # causing them to shift far outside the image even at near-zero rotation angles.
                 return (cx + focal_length * x_rot / z_cam,
-                        cy + focal_length * y_rot_3d / z_cam,
+                        cy + y_rot_3d,
                         z_rot)
             return (x_rot + cx, y_rot_3d + cy, z_rot)
 
         # Default: Y-axis rotation in XZ plane (simple mode or non-upright advanced)
         x_rot = (x - cx) * cos_t - z * sin_t
         z_rot = (x - cx) * sin_t + z * cos_t
-        y_rot = y - cy
         if use_perspective_projection:
             z_cam = focal_length + z_rot
             z_cam = max(z_cam, 0.1 * focal_length)
             return (cx + focal_length * x_rot / z_cam,
-                    cy + focal_length * y_rot / z_cam,
+                    y,  # Y unchanged: pure yaw does not affect vertical screen position
                     z_rot)
         return (x_rot + cx, y, z_rot)
 
