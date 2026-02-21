@@ -818,12 +818,14 @@ def render_openpose_image(
     height: int,
     debug: bool = False,
     axis_line: tuple[tuple[int, int], tuple[int, int]] | None = None,
+    draw_face_mesh: bool = True,
 ) -> np.ndarray:
     """
     Draw OpenPose skeleton on blank canvas. Black background (matches ControlNet pose images).
     Uses static connection and draw-order definitions; no depth computation.
     When debug=True and axis_line is provided, draws the rotation axis as a white dashed line
     through the two given 2D points (extended to canvas edges).
+    draw_face_mesh: when False, the 70-point face mesh is omitted from the output image.
     """
     canvas = np.zeros((height, width, 3), dtype=np.uint8)
 
@@ -878,7 +880,7 @@ def render_openpose_image(
 
     # Face mesh (OpenPose 70-point) - draw before hands so body/face compose first
     face_pts = keypoints.get("face", [])
-    if len(face_pts) >= 2:
+    if draw_face_mesh and len(face_pts) >= 2:
         face_color = (180, 180, 180)  # light gray
         face_max_len = diag * 0.4
         for a, b in FACE_EDGES:
@@ -930,6 +932,7 @@ def rotate_openpose(
     debug: bool = False,
     mode: str = "simple",
     recenter: bool = False,
+    draw_face_mesh: bool = True,
 ) -> tuple[np.ndarray, bool, dict[str, list[tuple[float, float, float]]] | None]:
     """
     Main pipeline: extract/parse keypoints, detect torso, rotate, render.
@@ -944,6 +947,7 @@ def rotate_openpose(
     recenter: when True, horizontally centers the rotated figure within the image after all
               other positioning corrections. Centering is measured from the widest body
               keypoints; vertical position is not changed.
+    draw_face_mesh: when False, the 70-point face mesh is omitted from the rendered output.
     """
     h, w = image.shape[:2]
 
@@ -1159,5 +1163,5 @@ def rotate_openpose(
         print(f"  pose_keypoints_2d (flat): {post_dict.get('people', [{}])[0].get('pose_keypoints_2d', [])}")
 
     # Render using static connection and draw-order definitions
-    rendered = render_openpose_image(rotated, w, h, debug=debug, axis_line=axis_line)
+    rendered = render_openpose_image(rotated, w, h, debug=debug, axis_line=axis_line, draw_face_mesh=draw_face_mesh)
     return rendered, True, rotated

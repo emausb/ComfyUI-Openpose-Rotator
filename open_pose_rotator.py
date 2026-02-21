@@ -28,6 +28,7 @@ class OpenPoseRotator:
                 "pose_keypoint": ("POSE_KEYPOINT",),
                 "debug": ("BOOLEAN", {"default": False}),
                 "recenter": ("BOOLEAN", {"default": True}),
+                "draw_face_mesh": ("BOOLEAN", {"default": True}),
             },
         }
 
@@ -40,6 +41,7 @@ class OpenPoseRotator:
         pose_keypoint: list | None = None,
         debug: bool = False,
         recenter: bool = False,
+        draw_face_mesh: bool = True,
     ) -> tuple[torch.Tensor, list]:
         """
         Rotate OpenPose figure(s) around torso. Processes batch of images.
@@ -47,6 +49,7 @@ class OpenPoseRotator:
         automatically derive perspective and focal-length — no manual tuning needed.
         recenter: when True, horizontally centers the rotated figure within the image
                   based on its widest body keypoints; vertical position is unchanged.
+        draw_face_mesh: when False, the 70-point face mesh is omitted from the output.
         Returns (image_tensor, rotated_pose_keypoints_list).
         """
         batch_size = image.shape[0]
@@ -75,6 +78,7 @@ class OpenPoseRotator:
                 debug=debug,
                 mode=mode,
                 recenter=recenter,
+                draw_face_mesh=draw_face_mesh,
             )
 
             if not success:
