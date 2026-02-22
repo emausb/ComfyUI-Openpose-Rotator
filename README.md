@@ -1,5 +1,7 @@
 # OpenPose Rotator
 
+> **⚠ Warning: This project is under active development and does not work well yet. Results may be inaccurate or unstable. Use at your own risk.**
+
 A ComfyUI custom node that rotates OpenPose figures around their torso pivot point. The node accepts an image and optional pose keypoints, detects the torso, applies Y-axis rotation (clockwise/counterclockwise), and outputs the rotated pose image.
 
 ## Features
