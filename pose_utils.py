@@ -418,7 +418,7 @@ ADVANCED_FIGURE_FILL = 0.90
 
 # Ankle y-parity threshold: fraction of figure height (neck→lower ankle) within which both ankles
 # are considered to be at the same elevation (standing upright on flat ground).
-UPRIGHT_ANKLE_THRESHOLD = 0.08
+UPRIGHT_ANKLE_THRESHOLD = 0.12
 
 
 def _detect_upright_figure(
